@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+debug/
+*.pdb
+
+# Cargo lock is committed for binary crates
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env

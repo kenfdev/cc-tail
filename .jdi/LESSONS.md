@@ -1,0 +1,11 @@
+
+## 2026-02-08 - Task #3, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** The security reviewer rejected the implementation due to two medium-severity issues: (1) No sanitization of ANSI escape sequences and control characters in tool names and input values — crafted inputs could inject terminal escape sequences that manipulate display or execute commands on vulnerable terminals. (2) Sensitive data exposure — file paths, bash commands, URLs, and search queries are output verbatim without redaction, potentially leaking credentials, API keys, and tokens in logs/terminal output. The implementation should sanitize control characters from all user-controlled strings and consider optional redaction of common secret patterns.
+## 2026-02-08 - Task #7, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** Security review identified unbounded memory allocation in `read_to_string` (no cap on bytes read per call) and unbounded `incomplete_line_buf` growth. When reading from files incrementally, always cap the maximum bytes read per call and limit buffer sizes to prevent OOM from pathological inputs.

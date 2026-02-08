@@ -1,0 +1,8 @@
+# Personal config (not shared with team)
+config.local.yaml
+
+# Runtime artifacts
+locks/
+status
+reports/
+lessons_archive/

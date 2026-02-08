@@ -1,0 +1,183 @@
+# Sample Workflow: Code Implementation with Parallel Review
+# This workflow demonstrates all available properties.
+#
+# Flow: plan -> implement -> review (parallel) -> finalize -> end
+#       └──────────────────────────┘ (loop on REJECTED)
+
+name: code-implementation
+description: Standard code implementation workflow with parallel review
+
+steps:
+  # Step 1: Planning phase
+  # The first step is always the entry point (no explicit start field needed)
+  - name: plan
+    agent: general-purpose                    # Sub-agent type (must be valid subagent_type)
+    prompt: |
+      Analyze the task and create an implementation plan.
+
+      Consider:
+      - Architecture and design decisions
+      - Files that need to be created or modified
+      - Potential risks and edge cases
+      - Testing strategy
+
+      IMPORTANT: End your response with exactly one of:
+      - PLANNED if the plan is ready
+      - BLOCKED if there are unresolved questions requiring human input
+    report:
+      name: plan                      # Creates .jdi/reports/{task_id}/plan.md
+      format: |                       # Advisory format (not enforced)
+        ## Implementation Plan
+
+        ### Overview
+        Brief description of approach...
+
+        ### Files to Modify
+        - path/to/file.ts - Description of changes
+
+        ### Design Decisions
+        - Decision 1: Rationale...
+
+        ### Risks
+        - Risk 1: Mitigation...
+
+        ### Testing Strategy
+        - Test approach...
+      validation: "PLANNED|BLOCKED"   # Regex pattern - at least one must match
+    next: implement                   # Default next step
+    conditions:
+      - keyword: BLOCKED
+        goto: plan                    # Retry until unblocked (or abort if stuck)
+
+  # Step 2: Implementation phase
+  - name: implement
+    agent: general-purpose
+    prompt: |
+      Implement the task according to the plan in reports/plan.md.
+
+      Requirements:
+      - Follow project coding standards
+      - Write tests for your changes
+      - Handle edge cases identified in the plan
+
+      IMPORTANT: End your response with exactly one of:
+      - DONE if implementation is complete
+      - ERROR if you encountered an unrecoverable issue
+    report:
+      name: implementation
+      format: |
+        ## Implementation Summary
+
+        ### Changes Made
+        - Description of change 1
+        - Description of change 2
+
+        ### Files Modified
+        - path/to/file.ts - What was changed
+
+        ### Tests Added
+        - test/file.test.ts - What is tested
+
+        ### Notes
+        Any additional context...
+      validation: "DONE|ERROR"
+    next: review
+    conditions:
+      - keyword: ERROR
+        goto: implement               # Retry on error
+
+  # Step 3: Parallel review phase
+  # Multiple agents review simultaneously
+  - name: review
+    parallel:
+      - agent: general-purpose
+        prompt: |
+          Review the implementation in reports/implementation.md for:
+          - Code quality and readability
+          - Test coverage and correctness
+          - Performance considerations
+          - Error handling
+
+          Reference the plan in reports/plan.md for context.
+
+          IMPORTANT: End your response with exactly one of:
+          - APPROVED if the code meets standards
+          - REJECTED with specific feedback if changes are needed
+      - agent: security-reviewer
+        prompt: |
+          Review the implementation in reports/implementation.md for:
+          - Security vulnerabilities (OWASP Top 10)
+          - Input validation
+          - Authentication/authorization issues
+          - Data exposure risks
+
+          IMPORTANT: End your response with exactly one of:
+          - APPROVED if no security issues found
+          - REJECTED with specific findings if issues exist
+    check: all                        # "all" = all must APPROVED, "any" = first APPROVED wins
+    report:
+      name: review                    # Creates review_0.md, review_1.md for each agent
+      format: |
+        ## Review Result
+
+        **Status:** APPROVED | REJECTED
+
+        ### Findings
+        - Finding 1
+        - Finding 2
+
+        ### Recommendations
+        - Recommendation 1
+      validation: "APPROVED|REJECTED"
+    next: finalize
+    conditions:
+      - keyword: APPROVED
+        goto: finalize
+      - keyword: REJECTED
+        goto: implement               # Loop back; feedback stored in task description
+
+  # Step 4: Finalization (final step)
+  - name: finalize
+    agent: general-purpose
+    prompt: |
+      Finalize the implementation:
+      - Remove any TODO comments
+      - Ensure documentation is complete
+      - Verify all tests pass
+      - Clean up debug code
+
+      Reference:
+      - reports/plan.md for original requirements
+      - reports/implementation.md for what was built
+      - reports/review_0.md and reports/review_1.md for review feedback
+
+      IMPORTANT: End your response with exactly one of:
+      - FINALIZED if everything is complete
+      - TASK_DONE if the task was already complete (include justification)
+    report:
+      name: finalization
+      format: |
+        ## Finalization Complete
+
+        ### Cleanup Performed
+        - Removed TODOs
+        - Updated documentation
+
+        ### Final Checklist
+        - [ ] All tests passing
+        - [ ] No debug code
+        - [ ] Documentation complete
+
+        ### Summary
+        Brief summary of completed work...
+      validation: "FINALIZED|TASK_DONE"
+    end: true                         # Marks workflow complete (no goto: end allowed)
+
+# Notes:
+# - Entry point: First step (plan) - tasks without step prefix start here
+# - Step prefix: Task subject like "[review] Fix bug" indicates current step
+# - TASK_DONE: Reserved keyword for short-circuiting when task needs no work
+# - Reports: Written to .jdi/reports/{task_id}/{step_name}.md
+# - Parallel reports: {step_name}_{index}.md (e.g., review_0.md, review_1.md)
+# - Conditions: Only goto is valid in conditions; end: true is step-level only
+# - Feedback: On REJECTED, feedback is appended to task description for next iteration
