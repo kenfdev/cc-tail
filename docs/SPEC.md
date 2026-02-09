@@ -155,6 +155,19 @@ cc-tail stream --file <path> [OPTIONS]
 
 Press `b` to toggle sidebar visibility. Useful in narrow terminals. When hidden, the log stream takes the full terminal width.
 
+### Log Stream Scroll Mode
+
+When the log stream has focus, pressing `Up`/`k`, `PgUp`, `g`/`Home`, or scrolling the mouse wheel up **enters scroll mode**. In scroll mode:
+
+- The log stream **freezes** at a snapshot of the current content. New entries continue to accumulate in the ring buffer but are not displayed until scroll mode exits.
+- The title bar shows `[SCROLL mode - Esc:exit]` to indicate the frozen state.
+- Use `Up`/`k`, `Down`/`j`, `PgUp`, `PgDn` to navigate within the snapshot.
+- `g`/`Home` jumps to the top; `G`/`End`/`Esc` exits scroll mode and returns to live tailing.
+- Mouse wheel scroll is also supported (scroll up enters scroll mode; scroll down navigates when already in scroll mode).
+- Scroll mode is automatically exited when: the user switches sessions, applies a new filter, or presses `G`/`End`/`Esc`.
+
+**Implementation**: uses a two-phase entry model. When scroll mode is first triggered, the render phase takes a snapshot of the current rendered lines and stores them in a `ScrollMode` struct. Subsequent scroll actions operate on this frozen snapshot without re-reading the ring buffer.
+
 ---
 
 ## Display
@@ -340,6 +353,13 @@ Vim-style key bindings:
 | Key | Context | Action |
 |---|---|---|
 | `j` / `k` | Sidebar focused | Navigate up/down in session/agent list |
+| `j` / `Down` | Log stream focused | Scroll down (when in scroll mode) |
+| `k` / `Up` | Log stream focused | Scroll up / enter scroll mode |
+| `PgUp` | Log stream focused | Page scroll up / enter scroll mode |
+| `PgDn` | Log stream focused | Page scroll down (when in scroll mode) |
+| `g` / `Home` | Log stream focused | Scroll to top / enter scroll mode |
+| `G` / `End` | Log stream focused | Exit scroll mode (return to live tail) |
+| `Esc` | Log stream focused | Exit scroll mode (if active) |
 | `Enter` | Sidebar focused | Switch to the highlighted session |
 | `Tab` | Global | Toggle focus between sidebar and log stream |
 | `/` | Global | Open filter input overlay |
@@ -638,6 +658,7 @@ Publish on GitHub Releases using **GitHub Actions with native runners** (macOS +
 - Dark/light theme support with reasonable defaults (no hand-tuned palettes)
 - Full text output (no truncation of long content blocks)
 - Toggleable sidebar
+- Scroll mode (freeze log stream, navigate history with keyboard/mouse)
 - Static help overlay (`?` key) — shortcuts only
 - Dynamic priority status bar (filters > shortcuts on narrow terminals)
 - Config file (`~/.config/cc-tail/config.toml`) — not auto-created, unknown keys ignored
@@ -654,7 +675,6 @@ Publish on GitHub Releases using **GitHub Actions with native runners** (macOS +
 
 ### Future (v2+)
 
-- Scrollback / pause-to-scroll mode
 - Progressive tool call rendering (show pending state, update on result)
 - Tool result parsing (exit codes, line counts, match counts)
 - `--raw` / streaming mode for non-TTY output (pipe-friendly)
