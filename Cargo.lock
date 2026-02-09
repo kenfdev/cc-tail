@@ -101,7 +101,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-tail"
+name = "cctail"
 version = "0.1.0"
 dependencies = [
  "clap",

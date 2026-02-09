@@ -98,6 +98,7 @@ pub trait Multiplexer {
     ) -> Result<PaneHandle, TmuxError>;
 
     /// Kill (close) a single pane by its ID.
+    #[allow(dead_code)]
     fn kill_pane(&self, pane_id: &str) -> Result<(), TmuxError>;
 
     /// Kill an entire tmux session by name.
@@ -140,6 +141,7 @@ impl TmuxBackend {
     }
 
     /// Check whether a tmux session with the given name exists.
+    #[allow(dead_code)]
     pub fn session_exists(&self, session_name: &str) -> bool {
         Command::new("tmux")
             .args(["has-session", "-t", session_name])
@@ -149,10 +151,8 @@ impl TmuxBackend {
     }
 
     /// Build the command arguments for creating a pane, exposed for testing.
-    pub fn build_split_window_args<'a>(
-        session_name: &'a str,
-        command: &'a str,
-    ) -> Vec<&'a str> {
+    #[allow(dead_code)]
+    pub fn build_split_window_args<'a>(session_name: &'a str, command: &'a str) -> Vec<&'a str> {
         vec![
             "split-window",
             "-t",
@@ -305,18 +305,14 @@ pub fn resolve_cc_tail_binary() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "cc-tail".to_string())
+        .unwrap_or_else(|| "cctail".to_string())
 }
 
 /// Build the `cc-tail stream` command string for a given log file.
 ///
 /// Format: `<binary> stream --file <path> --replay 0`
 pub fn build_stream_command(binary: &str, log_path: &Path) -> String {
-    format!(
-        "{} stream --file {} --replay 0",
-        binary,
-        log_path.display()
-    )
+    format!("{} stream --file {} --replay 0", binary, log_path.display())
 }
 
 // ---------------------------------------------------------------------------
@@ -353,11 +349,13 @@ impl TmuxManager {
     }
 
     /// Check whether tmux is available.
+    #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         self.backend.is_available()
     }
 
     /// Get the current session name, if any.
+    #[allow(dead_code)]
     pub fn session_name(&self) -> Option<&str> {
         self.session_name.as_deref()
     }
@@ -368,6 +366,7 @@ impl TmuxManager {
     }
 
     /// Check whether a pane exists for the given log path key.
+    #[allow(dead_code)]
     pub fn has_pane(&self, log_path_key: &str) -> bool {
         self.pane_handles.contains_key(log_path_key)
     }
@@ -410,7 +409,8 @@ impl TmuxManager {
             let cmd = build_stream_command(&self.binary_path, log_path);
             match self.backend.create_pane(&session_name, label, &cmd) {
                 Ok(handle) => {
-                    self.pane_handles.insert(log_path.display().to_string(), handle);
+                    self.pane_handles
+                        .insert(log_path.display().to_string(), handle);
                     created += 1;
                 }
                 Err(e) => {
@@ -434,11 +434,8 @@ impl TmuxManager {
     /// session was created.
     ///
     /// No-op if no session exists or if a pane already exists for this path.
-    pub fn spawn_pane_for_agent(
-        &mut self,
-        label: &str,
-        log_path: &Path,
-    ) -> Result<(), TmuxError> {
+    #[allow(dead_code)]
+    pub fn spawn_pane_for_agent(&mut self, label: &str, log_path: &Path) -> Result<(), TmuxError> {
         let session_name = match self.session_name {
             Some(ref name) => name.clone(),
             None => return Ok(()), // No session active, nothing to do.
@@ -612,19 +609,16 @@ mod tests {
 
     #[test]
     fn test_build_stream_command() {
-        let cmd = build_stream_command("cc-tail", Path::new("/tmp/session.jsonl"));
-        assert_eq!(cmd, "cc-tail stream --file /tmp/session.jsonl --replay 0");
+        let cmd = build_stream_command("cctail", Path::new("/tmp/session.jsonl"));
+        assert_eq!(cmd, "cctail stream --file /tmp/session.jsonl --replay 0");
     }
 
     #[test]
     fn test_build_stream_command_with_spaces() {
-        let cmd = build_stream_command(
-            "/usr/local/bin/cc-tail",
-            Path::new("/tmp/my session.jsonl"),
-        );
+        let cmd = build_stream_command("/usr/local/bin/cctail", Path::new("/tmp/my session.jsonl"));
         assert_eq!(
             cmd,
-            "/usr/local/bin/cc-tail stream --file /tmp/my session.jsonl --replay 0"
+            "/usr/local/bin/cctail stream --file /tmp/my session.jsonl --replay 0"
         );
     }
 
@@ -633,7 +627,7 @@ mod tests {
     #[test]
     fn test_resolve_cc_tail_binary_returns_string() {
         let bin = resolve_cc_tail_binary();
-        // Should return either the current exe path or "cc-tail" fallback.
+        // Should return either the current exe path or "cctail" fallback.
         assert!(!bin.is_empty());
     }
 
@@ -641,7 +635,10 @@ mod tests {
 
     #[test]
     fn test_build_split_window_args() {
-        let args = TmuxBackend::build_split_window_args("my-session", "cc-tail stream --file /tmp/a.jsonl --replay 0");
+        let args = TmuxBackend::build_split_window_args(
+            "my-session",
+            "cctail stream --file /tmp/a.jsonl --replay 0",
+        );
         assert!(args.contains(&"split-window"));
         assert!(args.contains(&"my-session"));
         assert!(args.contains(&"#{pane_id}"));

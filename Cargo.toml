@@ -1,9 +1,13 @@
 [package]
-name = "cc-tail"
+name = "cctail"
 version = "0.1.0"
 edition = "2021"
 description = "Monitor Claude Code sessions in real-time"
 license = "MIT"
+repository = "https://github.com/kenfdev/cc-tail"
+readme = "README.md"
+keywords = ["claude", "cli", "tui", "monitoring", "ai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
