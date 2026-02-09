@@ -10,14 +10,17 @@ A TUI application for monitoring Claude Code sessions in real-time.
 cargo install cctail
 ```
 
-### Pre-built binaries
+### Quick install (Linux / macOS)
 
-Download from [GitHub Releases](https://github.com/kenfdev/cc-tail/releases):
+```
+curl -fsSL https://raw.githubusercontent.com/kenfdev/cc-tail/main/install.sh | sh
+```
 
-- `cctail-x86_64-apple-darwin` (macOS Intel)
-- `cctail-aarch64-apple-darwin` (macOS Apple Silicon)
-- `cctail-x86_64-unknown-linux-gnu` (Linux x86_64)
-- `cctail-aarch64-unknown-linux-gnu` (Linux ARM64)
+Or with a custom install directory:
+
+```
+curl -fsSL https://raw.githubusercontent.com/kenfdev/cc-tail/main/install.sh | INSTALL_DIR=~/.local/bin sh
+```
 
 ## Usage
 
