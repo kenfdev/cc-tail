@@ -208,10 +208,7 @@ mod tests {
     #[test]
     fn test_bash_happy_path() {
         let input = json!({"command": "cargo test auth"});
-        assert_eq!(
-            summarize_tool_use("Bash", &input),
-            "[Bash] cargo test auth"
-        );
+        assert_eq!(summarize_tool_use("Bash", &input), "[Bash] cargo test auth");
     }
 
     #[test]
@@ -280,10 +277,7 @@ mod tests {
     #[test]
     fn test_skill_happy_path() {
         let input = json!({"skill": "agent-browser"});
-        assert_eq!(
-            summarize_tool_use("Skill", &input),
-            "[Skill] agent-browser"
-        );
+        assert_eq!(summarize_tool_use("Skill", &input), "[Skill] agent-browser");
     }
 
     // -----------------------------------------------------------------------
@@ -553,19 +547,13 @@ mod tests {
     #[test]
     fn test_sanitize_strips_csi_color_codes() {
         // ESC[31m = red, ESC[0m = reset
-        assert_eq!(
-            sanitize_control_chars("\x1b[31mERROR\x1b[0m"),
-            "ERROR"
-        );
+        assert_eq!(sanitize_control_chars("\x1b[31mERROR\x1b[0m"), "ERROR");
     }
 
     #[test]
     fn test_sanitize_strips_csi_cursor_movement() {
         // ESC[2J = clear screen, ESC[H = cursor home
-        assert_eq!(
-            sanitize_control_chars("\x1b[2Jhello\x1b[H"),
-            "hello"
-        );
+        assert_eq!(sanitize_control_chars("\x1b[2Jhello\x1b[H"), "hello");
     }
 
     #[test]
@@ -579,59 +567,38 @@ mod tests {
 
     #[test]
     fn test_sanitize_strips_null_bytes() {
-        assert_eq!(
-            sanitize_control_chars("hello\x00world"),
-            "helloworld"
-        );
+        assert_eq!(sanitize_control_chars("hello\x00world"), "helloworld");
     }
 
     #[test]
     fn test_sanitize_strips_bell_character() {
-        assert_eq!(
-            sanitize_control_chars("ding\x07dong"),
-            "dingdong"
-        );
+        assert_eq!(sanitize_control_chars("ding\x07dong"), "dingdong");
     }
 
     #[test]
     fn test_sanitize_strips_backspace() {
-        assert_eq!(
-            sanitize_control_chars("abc\x08\x08\x08secret"),
-            "abcsecret"
-        );
+        assert_eq!(sanitize_control_chars("abc\x08\x08\x08secret"), "abcsecret");
     }
 
     #[test]
     fn test_sanitize_strips_carriage_return() {
         // CR could be used to overwrite visible text in terminal
-        assert_eq!(
-            sanitize_control_chars("visible\rsecret"),
-            "visiblesecret"
-        );
+        assert_eq!(sanitize_control_chars("visible\rsecret"), "visiblesecret");
     }
 
     #[test]
     fn test_sanitize_preserves_newline() {
-        assert_eq!(
-            sanitize_control_chars("line1\nline2"),
-            "line1\nline2"
-        );
+        assert_eq!(sanitize_control_chars("line1\nline2"), "line1\nline2");
     }
 
     #[test]
     fn test_sanitize_preserves_tab() {
-        assert_eq!(
-            sanitize_control_chars("col1\tcol2"),
-            "col1\tcol2"
-        );
+        assert_eq!(sanitize_control_chars("col1\tcol2"), "col1\tcol2");
     }
 
     #[test]
     fn test_sanitize_strips_del_character() {
-        assert_eq!(
-            sanitize_control_chars("hello\x7fworld"),
-            "helloworld"
-        );
+        assert_eq!(sanitize_control_chars("hello\x7fworld"), "helloworld");
     }
 
     #[test]
@@ -710,18 +677,12 @@ mod tests {
 
     #[test]
     fn test_redact_password_env_var() {
-        assert_eq!(
-            redact_secrets("PASSWORD=hunter2"),
-            "PASSWORD=[REDACTED]"
-        );
+        assert_eq!(redact_secrets("PASSWORD=hunter2"), "PASSWORD=[REDACTED]");
     }
 
     #[test]
     fn test_redact_secret_env_var() {
-        assert_eq!(
-            redact_secrets("SECRET=topsecretvalue"),
-            "SECRET=[REDACTED]"
-        );
+        assert_eq!(redact_secrets("SECRET=topsecretvalue"), "SECRET=[REDACTED]");
     }
 
     #[test]

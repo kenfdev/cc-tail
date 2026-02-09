@@ -28,6 +28,7 @@ pub trait MessageFilter {
     fn matches(&self, entry: &LogEntry) -> bool;
 
     /// Human-readable description of this filter (for debugging / display).
+    #[allow(dead_code)]
     fn description(&self) -> String;
 }
 
@@ -174,12 +175,14 @@ impl MessageFilter for AgentFilter {
 ///
 /// An entry passes only if it passes **all** contained filters.
 /// An empty `AndFilter` matches everything.
+#[allow(dead_code)]
 pub struct AndFilter {
     filters: Vec<Box<dyn MessageFilter>>,
 }
 
 impl AndFilter {
     /// Create a new `AndFilter` from a list of boxed filters.
+    #[allow(dead_code)]
     pub fn new(filters: Vec<Box<dyn MessageFilter>>) -> Self {
         Self { filters }
     }
@@ -239,7 +242,9 @@ impl FilterState {
     ///
     /// When inactive, the log stream should render unfiltered.
     pub fn is_active(&self) -> bool {
-        !self.pattern.is_empty() || !self.enabled_roles.is_empty() || !self.enabled_agents.is_empty()
+        !self.pattern.is_empty()
+            || !self.enabled_roles.is_empty()
+            || !self.enabled_agents.is_empty()
     }
 
     /// Set the regex pattern, recompiling immediately.
@@ -265,6 +270,7 @@ impl FilterState {
     /// Build a composed filter from the current state.
     ///
     /// Returns `None` if no filters are active.
+    #[allow(dead_code)]
     pub fn build_filter(&self) -> Option<Box<dyn MessageFilter>> {
         if !self.is_active() {
             return None;
@@ -326,8 +332,7 @@ impl FilterState {
 
         // Agent filter
         if !self.enabled_agents.is_empty() {
-            let agent_filter =
-                AgentFilter::new(self.include_main, self.enabled_agents.clone());
+            let agent_filter = AgentFilter::new(self.include_main, self.enabled_agents.clone());
             if !agent_filter.matches(entry) {
                 return false;
             }

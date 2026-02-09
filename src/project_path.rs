@@ -62,7 +62,11 @@ fn escape_path(path: &Path) -> String {
     // Normalize trailing slash before escaping
     let normalized = s.trim_end_matches('/');
     // If the path was just "/", normalized is now empty; use the original
-    let input = if normalized.is_empty() { &*s } else { normalized };
+    let input = if normalized.is_empty() {
+        &*s
+    } else {
+        normalized
+    };
     input
         .chars()
         .map(|c| match c {
@@ -365,12 +369,8 @@ mod tests {
         // cwd = /foo/bar -> escaped = -foo-bar
         let base_dir = setup_projects_base(&["-foo-bar"]);
 
-        let result = detect_project_path_with_base(
-            base_dir.path(),
-            Path::new("/foo/bar"),
-            None,
-            no_git,
-        );
+        let result =
+            detect_project_path_with_base(base_dir.path(), Path::new("/foo/bar"), None, no_git);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), base_dir.path().join("-foo-bar"));
@@ -400,12 +400,8 @@ mod tests {
         // The more specific /foo/bar should win over /foo
         let base_dir = setup_projects_base(&["-foo", "-foo-bar"]);
 
-        let result = detect_project_path_with_base(
-            base_dir.path(),
-            Path::new("/foo/bar/baz"),
-            None,
-            no_git,
-        );
+        let result =
+            detect_project_path_with_base(base_dir.path(), Path::new("/foo/bar/baz"), None, no_git);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), base_dir.path().join("-foo-bar"));
@@ -416,9 +412,7 @@ mod tests {
         // cwd has no match, but git root does
         let base_dir = setup_projects_base(&["-git-repo-root"]);
 
-        let git_fn = |_cwd: &Path| -> Option<PathBuf> {
-            Some(PathBuf::from("/git/repo/root"))
-        };
+        let git_fn = |_cwd: &Path| -> Option<PathBuf> { Some(PathBuf::from("/git/repo/root")) };
 
         let result = detect_project_path_with_base(
             base_dir.path(),
@@ -457,12 +451,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let nonexistent_base = tmp.path().join("nonexistent");
 
-        let result = detect_project_path_with_base(
-            &nonexistent_base,
-            Path::new("/foo/bar"),
-            None,
-            no_git,
-        );
+        let result =
+            detect_project_path_with_base(&nonexistent_base, Path::new("/foo/bar"), None, no_git);
 
         // find_project_dir checks is_dir which returns false for nonexistent paths
         assert!(result.is_err());
@@ -481,10 +471,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            base_dir.path().join("-explicit-project")
-        );
+        assert_eq!(result.unwrap(), base_dir.path().join("-explicit-project"));
     }
 
     #[test]
@@ -492,16 +479,10 @@ mod tests {
         // Both exact CWD and git root match, exact CWD wins (higher priority)
         let base_dir = setup_projects_base(&["-exact-cwd", "-git-root"]);
 
-        let git_fn = |_cwd: &Path| -> Option<PathBuf> {
-            Some(PathBuf::from("/git/root"))
-        };
+        let git_fn = |_cwd: &Path| -> Option<PathBuf> { Some(PathBuf::from("/git/root")) };
 
-        let result = detect_project_path_with_base(
-            base_dir.path(),
-            Path::new("/exact/cwd"),
-            None,
-            git_fn,
-        );
+        let result =
+            detect_project_path_with_base(base_dir.path(), Path::new("/exact/cwd"), None, git_fn);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), base_dir.path().join("-exact-cwd"));
@@ -512,9 +493,7 @@ mod tests {
         // Parent walk finds a match, so git root should NOT be used
         let base_dir = setup_projects_base(&["-parent", "-git-root"]);
 
-        let git_fn = |_cwd: &Path| -> Option<PathBuf> {
-            Some(PathBuf::from("/git/root"))
-        };
+        let git_fn = |_cwd: &Path| -> Option<PathBuf> { Some(PathBuf::from("/git/root")) };
 
         let result = detect_project_path_with_base(
             base_dir.path(),
@@ -532,12 +511,8 @@ mod tests {
         // Git root returns None (git not installed or not a repo), nothing matches
         let base_dir = setup_projects_base(&[]);
 
-        let result = detect_project_path_with_base(
-            base_dir.path(),
-            Path::new("/no/match"),
-            None,
-            no_git,
-        );
+        let result =
+            detect_project_path_with_base(base_dir.path(), Path::new("/no/match"), None, no_git);
 
         assert!(result.is_err());
     }
@@ -564,10 +539,7 @@ mod tests {
         // The example from the plan
         let path = Path::new("/Users/fukuyamaken/ghq/github.com/kenfdev/cc-tail");
         let escaped = escape_path(path);
-        assert_eq!(
-            escaped,
-            "-Users-fukuyamaken-ghq-github-com-kenfdev-cc-tail"
-        );
+        assert_eq!(escaped, "-Users-fukuyamaken-ghq-github-com-kenfdev-cc-tail");
     }
 
     #[test]
@@ -584,12 +556,7 @@ mod tests {
         let escaped = escape_path(&canonical_cwd);
         fs::create_dir_all(base_dir.path().join(&escaped)).unwrap();
 
-        let result = detect_project_path_with_base(
-            base_dir.path(),
-            real_cwd.path(),
-            None,
-            no_git,
-        );
+        let result = detect_project_path_with_base(base_dir.path(), real_cwd.path(), None, no_git);
 
         assert!(result.is_ok());
     }

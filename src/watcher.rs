@@ -15,6 +15,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Security constants
@@ -79,15 +82,17 @@ impl FileWatchState {
 pub enum WatcherEvent {
     /// A new JSONL entry was successfully parsed from a watched file.
     NewEntry {
+        #[allow(dead_code)]
         source: PathBuf,
         entry: Box<LogEntry>,
     },
     /// A new `.jsonl` file was detected (created) in the watched directory.
     NewFileDetected {
+        #[allow(dead_code)]
         path: PathBuf,
     },
     /// An error occurred during watching or reading.
-    Error(String),
+    Error(#[allow(dead_code)] String),
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +135,29 @@ impl From<notify::Error> for WatcherError {
 }
 
 // ---------------------------------------------------------------------------
+// WatcherHandle
+// ---------------------------------------------------------------------------
+
+/// Handle for cleanly shutting down the file watcher.
+///
+/// Signals the watcher loop to exit on the next timeout check and aborts the
+/// tokio blocking task. Without this, the `spawn_blocking` thread blocks
+/// indefinitely on `recv()` and prevents the tokio runtime from shutting down.
+#[derive(Debug)]
+pub struct WatcherHandle {
+    shutdown: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+impl WatcherHandle {
+    /// Signal the watcher to stop and abort the background task.
+    pub fn shutdown(self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.handle.abort();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: JSONL file filter
 // ---------------------------------------------------------------------------
 
@@ -162,11 +190,7 @@ pub(crate) fn read_new_entries(
         Ok(f) => f,
         Err(e) => {
             if verbose {
-                eprintln!(
-                    "cc-tail: warning: could not open {}: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("cc-tail: warning: could not open {}: {}", path.display(), e);
             }
             return entries;
         }
@@ -178,11 +202,7 @@ pub(crate) fn read_new_entries(
         Ok(m) => m.len(),
         Err(e) => {
             if verbose {
-                eprintln!(
-                    "cc-tail: warning: could not stat {}: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("cc-tail: warning: could not stat {}: {}", path.display(), e);
             }
             return entries;
         }
@@ -224,11 +244,7 @@ pub(crate) fn read_new_entries(
         Ok(n) => n,
         Err(e) => {
             if verbose {
-                eprintln!(
-                    "cc-tail: warning: could not read {}: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("cc-tail: warning: could not read {}: {}", path.display(), e);
             }
             return entries;
         }
@@ -332,16 +348,16 @@ pub fn start_watching(
     verbose: bool,
     channel_capacity: usize,
     initial_offsets: HashMap<PathBuf, u64>,
-) -> Result<(mpsc::Receiver<WatcherEvent>, JoinHandle<()>), WatcherError> {
+) -> Result<(mpsc::Receiver<WatcherEvent>, WatcherHandle), WatcherError> {
     // Validate the project directory exists
     if !project_dir.is_dir() {
         return Err(WatcherError::ProjectDirNotFound(project_dir));
     }
 
     // Canonicalize the watched directory for consistent symlink comparison.
-    let canonical_dir = project_dir.canonicalize().map_err(|_| {
-        WatcherError::ProjectDirNotFound(project_dir.clone())
-    })?;
+    let canonical_dir = project_dir
+        .canonicalize()
+        .map_err(|_| WatcherError::ProjectDirNotFound(project_dir.clone()))?;
 
     let (tx, rx) = mpsc::channel::<WatcherEvent>(channel_capacity);
 
@@ -359,6 +375,10 @@ pub fn start_watching(
     // Start watching the directory recursively
     watcher.watch(project_dir.as_ref(), RecursiveMode::Recursive)?;
 
+    // Shutdown flag checked by the watcher loop on each timeout.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
     // Spawn a blocking task to bridge notify events to the async world
     let handle = tokio::task::spawn_blocking(move || {
         // Keep the watcher alive for the lifetime of this task
@@ -369,7 +389,7 @@ pub fn start_watching(
             .collect();
 
         loop {
-            match notify_rx.recv() {
+            match notify_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(Ok(event)) => {
                     process_notify_event(&event, &mut file_states, &tx, verbose, &canonical_dir);
                 }
@@ -379,7 +399,12 @@ pub fn start_watching(
                         e
                     )));
                 }
-                Err(_) => {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if shutdown_clone.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // The notify sender was dropped; the watcher is shutting down.
                     break;
                 }
@@ -387,7 +412,7 @@ pub fn start_watching(
         }
     });
 
-    Ok((rx, handle))
+    Ok((rx, WatcherHandle { shutdown, handle }))
 }
 
 /// Validate that a path, after resolving symlinks, is still within the
@@ -486,9 +511,7 @@ fn process_notify_event(
                 // Prune deleted files from file_states to prevent unbounded growth.
                 // Try to resolve symlink first; if that fails (file already gone),
                 // fall back to the original path for removal.
-                let key = path
-                    .canonicalize()
-                    .unwrap_or_else(|_| path.clone());
+                let key = path.canonicalize().unwrap_or_else(|_| path.clone());
                 file_states.remove(&key);
             }
             _ => {
@@ -536,10 +559,7 @@ mod tests {
         let entries = read_new_entries(&path, &mut state, false);
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[0].entry_type,
-            crate::log_entry::EntryType::User
-        );
+        assert_eq!(entries[0].entry_type, crate::log_entry::EntryType::User);
         assert_eq!(
             entries[1].entry_type,
             crate::log_entry::EntryType::Assistant
@@ -565,10 +585,7 @@ mod tests {
         let entries1 = read_new_entries(&path, &mut state, false);
 
         assert_eq!(entries1.len(), 1);
-        assert_eq!(
-            entries1[0].entry_type,
-            crate::log_entry::EntryType::User
-        );
+        assert_eq!(entries1[0].entry_type, crate::log_entry::EntryType::User);
         // The incomplete line should be buffered
         assert_eq!(state.incomplete_line_buf, r#"{"type": "assis"#);
 
@@ -609,7 +626,10 @@ mod tests {
         assert_eq!(entries1.len(), 1);
 
         // Append more content
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         let line2 = r#"{"type": "assistant", "sessionId": "s1"}"#;
         writeln!(file, "{}", line2).unwrap();
         drop(file);
@@ -623,7 +643,10 @@ mod tests {
         );
 
         // Append yet more content
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         let line3 = r#"{"type": "progress", "sessionId": "s1"}"#;
         let line4 = r#"{"type": "system", "sessionId": "s1"}"#;
         writeln!(file, "{}", line3).unwrap();
@@ -637,10 +660,7 @@ mod tests {
             entries3[0].entry_type,
             crate::log_entry::EntryType::Progress
         );
-        assert_eq!(
-            entries3[1].entry_type,
-            crate::log_entry::EntryType::System
-        );
+        assert_eq!(entries3[1].entry_type, crate::log_entry::EntryType::System);
     }
 
     // -- 4. Malformed line handling (skip bad lines) --------------------------
@@ -663,10 +683,7 @@ mod tests {
 
         // Only the two valid entries should be returned
         assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[0].entry_type,
-            crate::log_entry::EntryType::User
-        );
+        assert_eq!(entries[0].entry_type, crate::log_entry::EntryType::User);
         assert_eq!(
             entries[1].entry_type,
             crate::log_entry::EntryType::Assistant
@@ -697,10 +714,7 @@ mod tests {
         assert_eq!(state.byte_offset, initial.len() as u64);
 
         // Truncate the file and write shorter content
-        let new_content = concat!(
-            r#"{"type": "progress", "sessionId": "s2"}"#,
-            "\n",
-        );
+        let new_content = concat!(r#"{"type": "progress", "sessionId": "s2"}"#, "\n",);
         std::fs::write(&path, new_content).unwrap();
 
         // The file is now shorter than byte_offset, so truncation should be detected
@@ -710,10 +724,7 @@ mod tests {
             entries2[0].entry_type,
             crate::log_entry::EntryType::Progress
         );
-        assert_eq!(
-            entries2[0].session_id.as_deref(),
-            Some("s2")
-        );
+        assert_eq!(entries2[0].session_id.as_deref(), Some("s2"));
         assert_eq!(state.byte_offset, new_content.len() as u64);
     }
 
@@ -853,8 +864,8 @@ mod tests {
         assert!(result.is_ok());
 
         let (_rx, handle) = result.unwrap();
-        // Clean up: abort the background task
-        handle.abort();
+        // Clean up: signal the watcher to shut down
+        handle.shutdown();
     }
 
     // -- 15. process_notify_event ignores non-jsonl files --------------------
@@ -949,11 +960,7 @@ mod tests {
     #[test]
     fn test_read_new_entries_nonexistent_file() {
         let mut state = FileWatchState::new();
-        let entries = read_new_entries(
-            Path::new("/nonexistent/file.jsonl"),
-            &mut state,
-            false,
-        );
+        let entries = read_new_entries(Path::new("/nonexistent/file.jsonl"), &mut state, false);
         assert!(entries.is_empty());
     }
 
@@ -1021,7 +1028,10 @@ mod tests {
         let outside_file = create_temp_jsonl(tmp2.path(), "outside.jsonl", "");
 
         let result = validate_path_within_dir(&outside_file, &watched_dir, false);
-        assert!(result.is_none(), "path outside watched dir should be rejected");
+        assert!(
+            result.is_none(),
+            "path outside watched dir should be rejected"
+        );
     }
 
     #[test]
@@ -1032,7 +1042,10 @@ mod tests {
         let inside_file = create_temp_jsonl(tmp.path(), "inside.jsonl", "");
 
         let result = validate_path_within_dir(&inside_file, &watched_dir, false);
-        assert!(result.is_some(), "path inside watched dir should be accepted");
+        assert!(
+            result.is_some(),
+            "path inside watched dir should be accepted"
+        );
     }
 
     #[test]
@@ -1040,11 +1053,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let watched_dir = tmp.path().canonicalize().unwrap();
 
-        let result = validate_path_within_dir(
-            Path::new("/nonexistent/path.jsonl"),
-            &watched_dir,
-            false,
-        );
+        let result =
+            validate_path_within_dir(Path::new("/nonexistent/path.jsonl"), &watched_dir, false);
         assert!(result.is_none(), "nonexistent path should be rejected");
     }
 
@@ -1075,8 +1085,12 @@ mod tests {
     fn test_remove_event_prunes_file_states() {
         let tmp = TempDir::new().unwrap();
         let watched_dir = tmp.path().canonicalize().unwrap();
-        let path = create_temp_jsonl(tmp.path(), "removable.jsonl", r#"{"type": "user", "sessionId": "s1"}
-"#);
+        let path = create_temp_jsonl(
+            tmp.path(),
+            "removable.jsonl",
+            r#"{"type": "user", "sessionId": "s1"}
+"#,
+        );
         let canonical_path = path.canonicalize().unwrap();
 
         let (tx, _rx) = mpsc::channel::<WatcherEvent>(16);
@@ -1123,8 +1137,12 @@ mod tests {
         let path = tmp.path().join("deleted.jsonl");
 
         // Write and read the file to get it into file_states
-        std::fs::write(&path, r#"{"type": "user", "sessionId": "s1"}
-"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"type": "user", "sessionId": "s1"}
+"#,
+        )
+        .unwrap();
 
         let (tx, _rx) = mpsc::channel::<WatcherEvent>(16);
         let mut file_states = HashMap::new();

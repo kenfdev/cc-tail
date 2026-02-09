@@ -326,8 +326,7 @@ impl FilterOverlayState {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !self.role_options.is_empty()
-                    && self.role_selected < self.role_options.len() - 1
+                if !self.role_options.is_empty() && self.role_selected < self.role_options.len() - 1
                 {
                     self.role_selected += 1;
                 }
@@ -439,7 +438,11 @@ mod tests {
         );
 
         assert_eq!(overlay.role_options.len(), 2);
-        let user_opt = overlay.role_options.iter().find(|r| r.name == "user").unwrap();
+        let user_opt = overlay
+            .role_options
+            .iter()
+            .find(|r| r.name == "user")
+            .unwrap();
         assert!(user_opt.enabled);
         let asst_opt = overlay
             .role_options
@@ -501,10 +504,7 @@ mod tests {
         let mut overlay = default_overlay();
         overlay.visible = true;
         overlay.pattern_valid = false;
-        assert_eq!(
-            overlay.on_key(key(KeyCode::Enter)),
-            OverlayAction::Consumed
-        );
+        assert_eq!(overlay.on_key(key(KeyCode::Enter)), OverlayAction::Consumed);
     }
 
     #[test]

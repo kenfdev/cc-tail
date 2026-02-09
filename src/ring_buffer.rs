@@ -107,16 +107,19 @@ impl RingBuffer {
     }
 
     /// Total estimated byte size of all entries currently in the buffer.
+    #[allow(dead_code)]
     pub fn byte_size(&self) -> usize {
         self.total_bytes
     }
 
     /// Number of entries currently in the buffer.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Returns `true` if the buffer contains no entries.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -128,6 +131,7 @@ impl RingBuffer {
     }
 
     /// The configured byte budget for this buffer.
+    #[allow(dead_code)]
     pub fn byte_budget(&self) -> usize {
         self.byte_budget
     }
@@ -297,10 +301,7 @@ mod tests {
         );
 
         // Verify s0 and s1 were evicted (they are oldest).
-        let ids: Vec<_> = buf
-            .iter()
-            .filter_map(|e| e.session_id.as_deref())
-            .collect();
+        let ids: Vec<_> = buf.iter().filter_map(|e| e.session_id.as_deref()).collect();
         assert!(
             !ids.contains(&"s0"),
             "s0 should have been evicted, but found: {:?}",
@@ -322,7 +323,10 @@ mod tests {
 
         let big = make_entry_with_type("user", "oversized-session-id");
         let big_size = big.estimated_byte_size();
-        assert!(big_size > 10, "entry must be larger than budget for this test");
+        assert!(
+            big_size > 10,
+            "entry must be larger than budget for this test"
+        );
 
         buf.push(big);
 

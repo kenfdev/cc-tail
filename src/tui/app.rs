@@ -6,17 +6,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::config::AppConfig;
 use crate::filter::FilterState;
 use crate::replay::{replay_session, DEFAULT_REPLAY_COUNT};
 use crate::ring_buffer::RingBuffer;
-use crate::session::Session;
+use crate::session::{classify_new_file, Agent, NewFileKind, Session};
 use crate::theme::ThemeColors;
 use crate::tmux::TmuxManager;
 use crate::tui::filter_overlay::{FilterOverlayState, OverlayAction};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 // ---------------------------------------------------------------------------
 // ActiveFilters
@@ -36,6 +37,7 @@ pub struct ActiveFilters {
 
 impl ActiveFilters {
     /// Returns `true` if no filters are currently active.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.pattern.is_none() && self.level.is_none()
     }
@@ -86,6 +88,39 @@ impl ActiveFilters {
 pub enum Focus {
     Sidebar,
     LogStream,
+}
+
+// ---------------------------------------------------------------------------
+// Scroll types
+// ---------------------------------------------------------------------------
+
+/// A scroll action that is either applied immediately (when `ScrollMode` is
+/// already active) or stored as a pending request for the render phase to
+/// snapshot the current lines and compute the initial offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingScroll {
+    /// Scroll up by N lines.
+    Up(usize),
+    /// Scroll down by N lines.
+    Down(usize),
+    /// Jump to the top of the log stream.
+    ToTop,
+}
+
+/// State for the scroll (freeze) mode in the log stream panel.
+///
+/// When active, the log stream is frozen at a snapshot of rendered lines
+/// and the user can scroll through them instead of seeing live updates.
+#[derive(Debug, Clone)]
+pub struct ScrollMode {
+    /// The snapshot of rendered lines (set by the render phase).
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    /// Current scroll offset (0 = showing the bottom of the log).
+    pub offset: usize,
+    /// Total number of lines in the snapshot.
+    pub total_lines: usize,
+    /// Number of visible lines in the log stream area.
+    pub visible_height: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +185,10 @@ pub struct App {
     /// (e.g. last path component: `/Users/.../cc-tail` -> `"cc-tail"`).
     /// Shown in the status bar.
     pub project_display_name: Option<String>,
+    /// Active scroll (freeze) mode state, if the user has entered scroll mode.
+    pub scroll_mode: Option<ScrollMode>,
+    /// A pending scroll action waiting for the render phase to snapshot lines.
+    pub pending_scroll: Option<PendingScroll>,
 }
 
 impl App {
@@ -187,6 +226,8 @@ impl App {
             project_path: None,
             help_overlay_visible: false,
             project_display_name: None,
+            scroll_mode: None,
+            pending_scroll: None,
         }
     }
 
@@ -246,18 +287,80 @@ impl App {
             return;
         }
 
+        // Global keys (not focus-dependent).
         match key.code {
-            KeyCode::Char('q') => self.initiate_quit(),
-            KeyCode::Char('?') => self.help_overlay_visible = true,
-            KeyCode::Char('/') => self.open_filter_overlay(),
-            KeyCode::Char('p') => self.toggle_progress_visible(),
-            KeyCode::Char('t') => self.open_tmux_panes(),
-            KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Char('b') => self.toggle_sidebar(),
-            KeyCode::Up | KeyCode::Char('k') => self.select_prev_session(),
-            KeyCode::Down | KeyCode::Char('j') => self.select_next_session(),
-            KeyCode::Enter => self.confirm_session_selection(),
+            KeyCode::Char('q') => {
+                self.initiate_quit();
+                return;
+            }
+            KeyCode::Char('?') => {
+                self.help_overlay_visible = true;
+                return;
+            }
+            KeyCode::Char('/') => {
+                self.open_filter_overlay();
+                return;
+            }
+            KeyCode::Char('p') => {
+                self.toggle_progress_visible();
+                return;
+            }
+            KeyCode::Char('t') => {
+                self.open_tmux_panes();
+                return;
+            }
+            KeyCode::Tab => {
+                self.toggle_focus();
+                return;
+            }
+            KeyCode::Char('b') => {
+                self.toggle_sidebar();
+                return;
+            }
+            KeyCode::Enter => {
+                self.confirm_session_selection();
+                return;
+            }
             _ => {}
+        }
+
+        // Focus-dependent keys.
+        match self.focus {
+            Focus::Sidebar => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.select_prev_session(),
+                KeyCode::Down | KeyCode::Char('j') => self.select_next_session(),
+                _ => {}
+            },
+            Focus::LogStream => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.enter_scroll_mode(PendingScroll::Up(1));
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.is_in_scroll_mode() {
+                        self.apply_scroll(PendingScroll::Down(1));
+                    }
+                }
+                KeyCode::PageUp => {
+                    self.enter_scroll_mode(PendingScroll::Up(20));
+                }
+                KeyCode::PageDown => {
+                    if self.is_in_scroll_mode() {
+                        self.apply_scroll(PendingScroll::Down(20));
+                    }
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.enter_scroll_mode(PendingScroll::ToTop);
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    self.exit_scroll_mode();
+                }
+                KeyCode::Esc => {
+                    if self.is_in_scroll_mode() {
+                        self.exit_scroll_mode();
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -301,8 +404,7 @@ impl App {
         let session_id = match &self.active_session_id {
             Some(id) => id.clone(),
             None => {
-                self.status_message =
-                    Some("Select a session first (Enter on sidebar)".to_string());
+                self.status_message = Some("Select a session first (Enter on sidebar)".to_string());
                 return;
             }
         };
@@ -340,7 +442,10 @@ impl App {
         }
 
         let prefix = &self.config.tmux.session_prefix;
-        match self.tmux_manager.spawn_session(prefix, &project_path, &agent_log_paths) {
+        match self
+            .tmux_manager
+            .spawn_session(prefix, &project_path, &agent_log_paths)
+        {
             Ok(count) => {
                 self.status_message = Some(format!(
                     "tmux: spawned {} pane{}",
@@ -395,6 +500,90 @@ impl App {
         self.progress_visible = !self.progress_visible;
     }
 
+    // -- Scroll mode ---------------------------------------------------------
+
+    /// Returns `true` if scroll (freeze) mode is active.
+    pub fn is_in_scroll_mode(&self) -> bool {
+        self.scroll_mode.is_some()
+    }
+
+    /// Enter scroll mode or apply a scroll action if already in scroll mode.
+    ///
+    /// When scroll mode is not yet active, the action is stored as a
+    /// `pending_scroll` for the render phase to snapshot the current lines
+    /// and compute the initial offset. When scroll mode IS active, the
+    /// action is applied immediately via `apply_scroll`.
+    pub fn enter_scroll_mode(&mut self, action: PendingScroll) {
+        if self.scroll_mode.is_some() {
+            self.apply_scroll(action);
+        } else {
+            self.pending_scroll = Some(action);
+        }
+    }
+
+    /// Exit scroll mode, returning to live-tailing.
+    pub fn exit_scroll_mode(&mut self) {
+        self.scroll_mode = None;
+        self.pending_scroll = None;
+    }
+
+    /// Apply a scroll action to the active scroll mode state.
+    ///
+    /// - `Up(n)`: scroll up (increase offset), clamped to max.
+    /// - `Down(n)`: scroll down (decrease offset); exits scroll mode if at bottom.
+    /// - `ToTop`: jump to the top (max offset).
+    pub fn apply_scroll(&mut self, action: PendingScroll) {
+        if let Some(ref mut sm) = self.scroll_mode {
+            let max_offset = sm.total_lines.saturating_sub(sm.visible_height);
+            match action {
+                PendingScroll::Up(n) => {
+                    sm.offset = sm.offset.saturating_add(n).min(max_offset);
+                }
+                PendingScroll::Down(n) => {
+                    if sm.offset == 0 {
+                        // Already at bottom, exit scroll mode.
+                        self.scroll_mode = None;
+                        self.pending_scroll = None;
+                        return;
+                    }
+                    sm.offset = sm.offset.saturating_sub(n);
+                }
+                PendingScroll::ToTop => {
+                    sm.offset = max_offset;
+                }
+            }
+        }
+    }
+
+    /// Handle a mouse event.
+    ///
+    /// ScrollUp enters/applies scroll up; ScrollDown scrolls down (only
+    /// when already in scroll mode).
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        // Only respond to mouse scroll when focused on LogStream.
+        if self.focus != Focus::LogStream {
+            return;
+        }
+
+        // Ignore mouse events when overlays are active.
+        if self.help_overlay_visible || self.filter_overlay.visible || self.quit_confirm_pending {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.enter_scroll_mode(PendingScroll::Up(3));
+            }
+            MouseEventKind::ScrollDown => {
+                // Only scroll down when already in scroll mode.
+                if self.is_in_scroll_mode() {
+                    self.apply_scroll(PendingScroll::Down(3));
+                }
+            }
+            _ => {}
+        }
+    }
+
     // -- Session selection ---------------------------------------------------
 
     /// Move the session selection up by one.
@@ -430,6 +619,9 @@ impl App {
         self.active_session_id = Some(session.id.clone());
         self.focus = Focus::LogStream;
 
+        // Exit scroll mode when switching sessions.
+        self.exit_scroll_mode();
+
         // Replay recent messages from the selected session.
         self.replay_session_entries(&session);
     }
@@ -459,6 +651,77 @@ impl App {
     /// Called by the event loop when the watcher delivers a `NewLogEntry`.
     pub fn on_new_log_entry(&mut self, entry: crate::log_entry::LogEntry) {
         self.ring_buffer.push(entry);
+    }
+
+    /// Handle a newly detected JSONL file from the watcher.
+    ///
+    /// Classifies the file path and either creates a new session
+    /// (for top-level files) or adds a subagent to an existing session.
+    pub fn on_new_file_detected(&mut self, path: PathBuf) {
+        // Need a project path to classify the file.
+        let project_path = match &self.project_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        // Canonicalize project_path for comparison (watcher sends canonical paths).
+        let canonical_project_dir = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
+
+        match classify_new_file(&path, &canonical_project_dir) {
+            NewFileKind::TopLevelSession { session_id } => {
+                // Check for duplicate session.
+                if self.sessions.iter().any(|s| s.id == session_id) {
+                    return;
+                }
+
+                let was_non_empty = !self.sessions.is_empty();
+
+                let session = Session {
+                    id: session_id.clone(),
+                    agents: vec![Agent {
+                        agent_id: None,
+                        slug: None,
+                        log_path: path,
+                        is_main: true,
+                    }],
+                    last_modified: SystemTime::now(),
+                };
+
+                self.sessions.insert(0, session);
+                self.new_session_ids.insert(session_id);
+
+                if was_non_empty {
+                    self.selected_session_index += 1;
+                }
+            }
+            NewFileKind::Subagent {
+                session_id,
+                agent_id,
+            } => {
+                // Find the parent session.
+                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+                    // Check for duplicate agent.
+                    if session
+                        .agents
+                        .iter()
+                        .any(|a| a.agent_id.as_deref() == Some(&agent_id))
+                    {
+                        return;
+                    }
+
+                    session.agents.push(Agent {
+                        agent_id: Some(agent_id),
+                        slug: None,
+                        log_path: path,
+                        is_main: false,
+                    });
+                    session.last_modified = SystemTime::now();
+                }
+            }
+            NewFileKind::Unknown => {}
+        }
     }
 
     /// Adjust the sidebar scroll offset so the selected session is visible.
@@ -523,13 +786,15 @@ impl App {
             level: if new_state.enabled_roles.is_empty() {
                 None
             } else {
-                let roles: Vec<String> =
-                    new_state.enabled_roles.iter().cloned().collect();
+                let roles: Vec<String> = new_state.enabled_roles.iter().cloned().collect();
                 Some(roles.join(","))
             },
         };
 
         self.filter_state = new_state;
+
+        // Exit scroll mode when filters change (content snapshot is stale).
+        self.exit_scroll_mode();
     }
 
     /// Collect unique message roles from entries in the ring buffer.
@@ -828,6 +1093,7 @@ mod tests {
     #[test]
     fn test_on_key_down_arrow_selects_next() {
         let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
         app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
 
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -837,6 +1103,7 @@ mod tests {
     #[test]
     fn test_on_key_up_arrow_selects_prev() {
         let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
         app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
         app.selected_session_index = 1;
 
@@ -847,6 +1114,7 @@ mod tests {
     #[test]
     fn test_on_key_j_selects_next() {
         let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
         app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
 
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -856,6 +1124,7 @@ mod tests {
     #[test]
     fn test_on_key_k_selects_prev() {
         let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
         app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
         app.selected_session_index = 1;
 
@@ -1195,10 +1464,7 @@ mod tests {
         assert!(!app.filter_overlay.visible);
         assert!(app.filter_state.is_active());
         assert_eq!(app.filter_state.pattern, "error");
-        assert_eq!(
-            app.active_filters.pattern,
-            Some("error".to_string())
-        );
+        assert_eq!(app.active_filters.pattern, Some("error".to_string()));
     }
 
     #[test]
@@ -1218,10 +1484,8 @@ mod tests {
 
         let mut app = App::new(test_config());
         app.ring_buffer.push(
-            parse_jsonl_line(
-                r#"{"type": "user", "message": {"role": "user", "content": "hi"}}"#,
-            )
-            .unwrap(),
+            parse_jsonl_line(r#"{"type": "user", "message": {"role": "user", "content": "hi"}}"#)
+                .unwrap(),
         );
         app.ring_buffer.push(
             parse_jsonl_line(
@@ -1252,10 +1516,8 @@ mod tests {
             .unwrap(),
         );
         app.ring_buffer.push(
-            parse_jsonl_line(
-                r#"{"type": "user", "message": {"role": "user", "content": "hi"}}"#,
-            )
-            .unwrap(),
+            parse_jsonl_line(r#"{"type": "user", "message": {"role": "user", "content": "hi"}}"#)
+                .unwrap(),
         );
 
         let agents = app.collect_known_agents();
@@ -1380,7 +1642,10 @@ mod tests {
         assert!(app.status_message.is_some());
         let msg = app.status_message.as_ref().unwrap();
         assert!(
-            msg.contains("tmux") || msg.contains("not inside") || msg.contains("project path") || msg.contains("session"),
+            msg.contains("tmux")
+                || msg.contains("not inside")
+                || msg.contains("project path")
+                || msg.contains("session"),
             "expected error status message, got: {}",
             msg
         );
@@ -1608,5 +1873,452 @@ mod tests {
             Some(val) => std::env::set_var("TMUX", val),
             None => std::env::remove_var("TMUX"),
         }
+    }
+
+    // -- on_new_file_detected tests -------------------------------------------
+
+    #[test]
+    fn test_on_new_file_detected_new_session() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let canonical_project_dir = project_dir.canonicalize().unwrap();
+
+        let mut app = App::new(test_config());
+        app.project_path = Some(project_dir);
+        // Add an existing session so we can verify selected_session_index is incremented.
+        app.sessions = vec![dummy_session("existing")];
+        app.selected_session_index = 0;
+
+        let new_file_path = canonical_project_dir.join("new-session-abc.jsonl");
+        app.on_new_file_detected(new_file_path);
+
+        // Session should be inserted at index 0.
+        assert_eq!(app.sessions.len(), 2);
+        assert_eq!(app.sessions[0].id, "new-session-abc");
+        // new_session_ids should contain the new session id.
+        assert!(app.new_session_ids.contains("new-session-abc"));
+        // selected_session_index should be incremented (was 0, now 1).
+        assert_eq!(app.selected_session_index, 1);
+    }
+
+    #[test]
+    fn test_on_new_file_detected_duplicate_session_ignored() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let canonical_project_dir = project_dir.canonicalize().unwrap();
+
+        let mut app = App::new(test_config());
+        app.project_path = Some(project_dir);
+        app.sessions = vec![dummy_session("dup-session")];
+
+        let new_file_path = canonical_project_dir.join("dup-session.jsonl");
+        app.on_new_file_detected(new_file_path);
+
+        // Sessions count should remain unchanged.
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn test_on_new_file_detected_no_project_path() {
+        let mut app = App::new(test_config());
+        app.project_path = None;
+
+        let path = PathBuf::from("/fake/project/.claude/new-session.jsonl");
+        app.on_new_file_detected(path);
+
+        // No-op: sessions should remain empty.
+        assert!(app.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_on_new_file_detected_subagent_added() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let canonical_project_dir = project_dir.canonicalize().unwrap();
+
+        let mut app = App::new(test_config());
+        app.project_path = Some(project_dir);
+        app.sessions = vec![dummy_session("parent-sess")];
+
+        let subagent_path = canonical_project_dir
+            .join("parent-sess")
+            .join("subagents")
+            .join("agent-sub123.jsonl");
+        app.on_new_file_detected(subagent_path);
+
+        // The parent session should now have 2 agents (1 main + 1 subagent).
+        assert_eq!(app.sessions[0].agents.len(), 2);
+        let sub = app.sessions[0].agents.iter().find(|a| !a.is_main).unwrap();
+        assert_eq!(sub.agent_id.as_deref(), Some("sub123"));
+    }
+
+    // -- Scroll mode tests ----------------------------------------------------
+
+    /// Helper: create an App with scroll_mode pre-set for testing.
+    fn app_with_scroll_mode(offset: usize, total_lines: usize, visible_height: usize) -> App {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.scroll_mode = Some(ScrollMode {
+            lines: Vec::new(),
+            offset,
+            total_lines,
+            visible_height,
+        });
+        app
+    }
+
+    #[test]
+    fn test_new_defaults_scroll_fields() {
+        let app = App::new(test_config());
+        assert!(app.scroll_mode.is_none());
+        assert!(app.pending_scroll.is_none());
+        assert!(!app.is_in_scroll_mode());
+    }
+
+    #[test]
+    fn test_enter_scroll_mode_sets_pending_when_not_active() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.enter_scroll_mode(PendingScroll::Up(1));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::Up(1)));
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_enter_scroll_mode_applies_when_already_active() {
+        let mut app = app_with_scroll_mode(5, 100, 20);
+        app.enter_scroll_mode(PendingScroll::Up(3));
+        // Should apply directly: 5 + 3 = 8
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 8);
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_exit_scroll_mode_clears_state() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.pending_scroll = Some(PendingScroll::ToTop);
+        app.exit_scroll_mode();
+        assert!(app.scroll_mode.is_none());
+        assert!(app.pending_scroll.is_none());
+        assert!(!app.is_in_scroll_mode());
+    }
+
+    #[test]
+    fn test_apply_scroll_up_clamps_to_max() {
+        // total=30, visible=20 => max_offset=10
+        let mut app = app_with_scroll_mode(8, 30, 20);
+        app.apply_scroll(PendingScroll::Up(5));
+        // 8 + 5 = 13, clamped to 10
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 10);
+    }
+
+    #[test]
+    fn test_apply_scroll_down_reduces_offset() {
+        let mut app = app_with_scroll_mode(5, 100, 20);
+        app.apply_scroll(PendingScroll::Down(3));
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 2);
+    }
+
+    #[test]
+    fn test_apply_scroll_down_at_zero_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(0, 100, 20);
+        app.apply_scroll(PendingScroll::Down(1));
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_apply_scroll_to_top() {
+        // total=50, visible=20 => max_offset=30
+        let mut app = app_with_scroll_mode(5, 50, 20);
+        app.apply_scroll(PendingScroll::ToTop);
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 30);
+    }
+
+    #[test]
+    fn test_apply_scroll_down_saturating_sub() {
+        let mut app = app_with_scroll_mode(2, 100, 20);
+        app.apply_scroll(PendingScroll::Down(5));
+        // 2 - 5 saturates to 0; but offset was > 0, so it does not exit scroll mode
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 0);
+    }
+
+    #[test]
+    fn test_is_in_scroll_mode_true_when_active() {
+        let app = app_with_scroll_mode(0, 10, 10);
+        assert!(app.is_in_scroll_mode());
+    }
+
+    // -- Focus-aware key dispatch tests ---------------------------------------
+
+    #[test]
+    fn test_up_key_on_logstream_sets_pending_scroll() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::Up(1)));
+    }
+
+    #[test]
+    fn test_down_key_on_logstream_no_scroll_mode_is_noop() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.pending_scroll.is_none());
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_down_key_on_logstream_with_scroll_mode() {
+        let mut app = app_with_scroll_mode(5, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 4);
+    }
+
+    #[test]
+    fn test_k_key_on_logstream_sets_pending_scroll() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::Up(1)));
+    }
+
+    #[test]
+    fn test_j_key_on_logstream_no_scroll_mode_is_noop() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_pageup_on_logstream_sets_pending_scroll() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::Up(20)));
+    }
+
+    #[test]
+    fn test_pagedown_on_logstream_no_scroll_mode_is_noop() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_pagedown_on_logstream_in_scroll_mode() {
+        let mut app = app_with_scroll_mode(25, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 5);
+    }
+
+    #[test]
+    fn test_g_key_on_logstream_enters_scroll_to_top() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::ToTop));
+    }
+
+    #[test]
+    fn test_home_key_on_logstream_enters_scroll_to_top() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::ToTop));
+    }
+
+    #[test]
+    fn test_capital_g_on_logstream_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_end_key_on_logstream_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_esc_on_logstream_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_esc_on_logstream_no_scroll_mode_is_noop() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        let before_quit = app.should_quit;
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Should not quit or change state
+        assert_eq!(app.should_quit, before_quit);
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_up_key_on_sidebar_navigates_sessions() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
+        app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
+        app.selected_session_index = 1;
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.selected_session_index, 0);
+        // Should not enter scroll mode
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_down_key_on_sidebar_navigates_sessions() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
+        app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_session_index, 1);
+        assert!(app.pending_scroll.is_none());
+    }
+
+    // -- Scroll reset tests ---------------------------------------------------
+
+    #[test]
+    fn test_confirm_session_selection_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.sessions = vec![dummy_session("s1")];
+        app.selected_session_index = 0;
+        app.confirm_session_selection();
+        assert!(app.scroll_mode.is_none());
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_apply_filter_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        // Open the filter overlay and apply an empty filter
+        app.filter_overlay.visible = true;
+        app.apply_filter();
+        assert!(app.scroll_mode.is_none());
+        assert!(app.pending_scroll.is_none());
+    }
+
+    // -- Mouse event tests ----------------------------------------------------
+
+    #[test]
+    fn test_on_mouse_scroll_up_enters_scroll_mode() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.pending_scroll, Some(PendingScroll::Up(3)));
+    }
+
+    #[test]
+    fn test_on_mouse_scroll_down_noop_when_not_in_scroll_mode() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        // No pending scroll and no scroll mode
+        assert!(app.pending_scroll.is_none());
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_on_mouse_scroll_down_in_scroll_mode() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = app_with_scroll_mode(10, 100, 20);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 7);
+    }
+
+    #[test]
+    fn test_on_mouse_ignored_on_sidebar_focus() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::Sidebar;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_on_mouse_ignored_when_help_overlay_visible() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.help_overlay_visible = true;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_on_mouse_ignored_when_filter_overlay_visible() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.filter_overlay.visible = true;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.pending_scroll.is_none());
+    }
+
+    #[test]
+    fn test_on_mouse_ignored_when_quit_confirm_pending() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.quit_confirm_pending = true;
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.pending_scroll.is_none());
     }
 }

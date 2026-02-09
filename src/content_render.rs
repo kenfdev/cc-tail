@@ -39,6 +39,26 @@ pub fn render_content_blocks(content: &Value) -> Vec<RenderedLine> {
     }
 }
 
+/// Check whether a `message.content` value would produce any visible output.
+///
+/// This is a lightweight check that avoids the allocation cost of building the
+/// full `Vec<RenderedLine>` — it returns `true` as soon as it finds a renderable
+/// block, without constructing any strings.
+pub fn has_renderable_content(content: &Value) -> bool {
+    match content {
+        Value::String(_) => true,
+        Value::Array(blocks) => blocks.iter().any(|block| {
+            let obj = match block.as_object() {
+                Some(o) => o,
+                None => return false,
+            };
+            let block_type = obj.get("type").and_then(Value::as_str).unwrap_or("unknown");
+            block_type != "tool_result"
+        }),
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers — array dispatch
 // ---------------------------------------------------------------------------
@@ -53,10 +73,7 @@ fn render_array(blocks: &[Value]) -> Vec<RenderedLine> {
             None => continue,
         };
 
-        let block_type = obj
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let block_type = obj.get("type").and_then(Value::as_str).unwrap_or("unknown");
 
         match block_type {
             "text" => {
@@ -69,10 +86,7 @@ fn render_array(blocks: &[Value]) -> Vec<RenderedLine> {
                 // If "text" key is missing entirely, skip.
             }
             "tool_use" => {
-                let name = obj
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
                 let input = obj.get("input").unwrap_or(&Value::Null);
                 let summary = summarize_tool_use(name, input);
                 lines.push(RenderedLine::ToolUse(summary));
@@ -81,9 +95,7 @@ fn render_array(blocks: &[Value]) -> Vec<RenderedLine> {
                 // Explicitly skipped per spec.
             }
             _ => {
-                let size_bytes = serde_json::to_string(block)
-                    .map(|s| s.len())
-                    .unwrap_or(0);
+                let size_bytes = serde_json::to_string(block).map(|s| s.len()).unwrap_or(0);
                 let label = format!("[{}] ({})", block_type, format_size(size_bytes));
                 lines.push(RenderedLine::Unknown(label));
             }
@@ -94,7 +106,9 @@ fn render_array(blocks: &[Value]) -> Vec<RenderedLine> {
 
 /// Split a string on newlines and wrap each line as `RenderedLine::Text`.
 fn split_text_lines(s: &str) -> Vec<RenderedLine> {
-    s.split('\n').map(|l| RenderedLine::Text(l.to_string())).collect()
+    s.split('\n')
+        .map(|l| RenderedLine::Text(l.to_string()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +150,10 @@ mod tests {
     fn test_text_block_single_line() {
         let content = json!([{"type": "text", "text": "Hello, world!"}]);
         let result = render_content_blocks(&content);
-        assert_eq!(result, vec![RenderedLine::Text("Hello, world!".to_string())]);
+        assert_eq!(
+            result,
+            vec![RenderedLine::Text("Hello, world!".to_string())]
+        );
     }
 
     #[test]
@@ -597,6 +614,89 @@ mod tests {
         let result = render_content_blocks(&content);
         assert_eq!(result, vec![RenderedLine::Text("".to_string())]);
     }
+
+    // -----------------------------------------------------------------------
+    // 9. has_renderable_content tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_has_renderable_content_string() {
+        assert!(has_renderable_content(&json!("hello")));
+    }
+
+    #[test]
+    fn test_has_renderable_content_empty_string() {
+        assert!(has_renderable_content(&json!("")));
+    }
+
+    #[test]
+    fn test_has_renderable_content_text_block() {
+        assert!(has_renderable_content(
+            &json!([{"type": "text", "text": "hi"}])
+        ));
+    }
+
+    #[test]
+    fn test_has_renderable_content_tool_use_block() {
+        assert!(has_renderable_content(
+            &json!([{"type": "tool_use", "name": "Read", "input": {}}])
+        ));
+    }
+
+    #[test]
+    fn test_has_renderable_content_tool_result_only() {
+        assert!(!has_renderable_content(&json!([
+            {"type": "tool_result", "tool_use_id": "t1", "content": "data"}
+        ])));
+    }
+
+    #[test]
+    fn test_has_renderable_content_multiple_tool_results() {
+        assert!(!has_renderable_content(&json!([
+            {"type": "tool_result", "tool_use_id": "t1", "content": "data1"},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "data2"}
+        ])));
+    }
+
+    #[test]
+    fn test_has_renderable_content_tool_result_with_text() {
+        assert!(has_renderable_content(&json!([
+            {"type": "tool_result", "tool_use_id": "t1", "content": "data"},
+            {"type": "text", "text": "visible"}
+        ])));
+    }
+
+    #[test]
+    fn test_has_renderable_content_empty_array() {
+        assert!(!has_renderable_content(&json!([])));
+    }
+
+    #[test]
+    fn test_has_renderable_content_null() {
+        assert!(!has_renderable_content(&Value::Null));
+    }
+
+    #[test]
+    fn test_has_renderable_content_number() {
+        assert!(!has_renderable_content(&json!(42)));
+    }
+
+    #[test]
+    fn test_has_renderable_content_non_object_elements() {
+        assert!(!has_renderable_content(&json!([42, "string", true])));
+    }
+
+    #[test]
+    fn test_has_renderable_content_unknown_type() {
+        // Unknown block types still produce RenderedLine::Unknown, so they are renderable.
+        assert!(has_renderable_content(
+            &json!([{"type": "thinking", "thinking": "hmm"}])
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Edge case tests (continued)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_text_block_with_trailing_newline() {

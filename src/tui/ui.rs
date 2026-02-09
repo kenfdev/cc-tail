@@ -13,11 +13,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::content_render::{render_content_blocks, RenderedLine};
+use crate::content_render::{has_renderable_content, render_content_blocks, RenderedLine};
 use crate::log_entry::{EntryType, LogEntry};
 use crate::session::SessionStatus;
 use crate::theme::ThemeColors;
-use crate::tui::app::{App, Focus};
+use crate::tui::app::{App, Focus, ScrollMode};
 use crate::tui::filter_overlay::FilterOverlayFocus;
 
 // ---------------------------------------------------------------------------
@@ -142,10 +142,9 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(theme.sidebar_active_marker)
                     .add_modifier(Modifier::BOLD),
             ),
-            SessionStatus::Inactive => Span::styled(
-                "  ",
-                Style::default().fg(theme.sidebar_inactive_marker),
-            ),
+            SessionStatus::Inactive => {
+                Span::styled("  ", Style::default().fg(theme.sidebar_inactive_marker))
+            }
         };
 
         // 6-char ID prefix.
@@ -189,10 +188,7 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             let prefix = "  \u{2514} ";
             let available = max_width.saturating_sub(prefix.len());
             let truncated_slug = if slug_display.len() > available {
-                format!(
-                    "{}...",
-                    &slug_display[..available.saturating_sub(3)]
-                )
+                format!("{}...", &slug_display[..available.saturating_sub(3)])
             } else {
                 slug_display.to_string()
             };
@@ -262,8 +258,14 @@ fn format_relative_time(time: SystemTime) -> String {
 /// Filters entries by `active_session_id` (if set), renders each entry
 /// as styled lines with timestamps, role indicators, optional agent
 /// prefixes, and content text. Uses ratatui word-wrap and auto-scrolls
-/// to the bottom.
-fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
+/// to the bottom in normal mode.
+///
+/// Three rendering branches:
+/// - **Branch A**: `scroll_mode` is active -- render from frozen snapshot.
+/// - **Branch B**: `pending_scroll` is set -- build lines, create snapshot,
+///   apply pending action, render from new snapshot.
+/// - **Branch C**: normal -- existing auto-scroll behavior.
+fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme_colors;
     let focused = app.focus == Focus::LogStream;
     let border_style = if focused {
@@ -272,12 +274,37 @@ fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme.border_unfocused)
     };
 
+    // Dynamic title: show scroll indicator when in scroll mode or pending scroll.
+    let title = if app.scroll_mode.is_some() || app.pending_scroll.is_some() {
+        " Log Stream [SCROLL mode - Esc:exit] "
+    } else {
+        " Log Stream "
+    };
+
     let block = Block::default()
-        .title(" Log Stream ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    // Collect filtered entries.
+    let inner_height = block.inner(area).height as usize;
+
+    // -- Branch A: scroll_mode already active -- render from frozen snapshot.
+    if let Some(ref scroll) = app.scroll_mode {
+        // scroll.offset is "lines from the bottom": 0 = bottom, max = top.
+        // Convert to ratatui scroll: ratatui_scroll = max_offset - scroll.offset
+        // where max_offset = total_lines - visible_height (shows the bottom).
+        let max_ratatui = scroll.total_lines.saturating_sub(scroll.visible_height);
+        let ratatui_scroll = max_ratatui.saturating_sub(scroll.offset);
+        let paragraph = Paragraph::new(scroll.lines.clone())
+            .style(Style::default().fg(theme.logstream_text))
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((ratatui_scroll as u16, 0));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // -- Build lines from the ring buffer (used by both Branch B and C). --
     let filter_state = &app.filter_state;
     let progress_visible = app.progress_visible;
 
@@ -286,7 +313,14 @@ fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
     // FileHistorySnapshot and other types are always hidden.
     let is_type_visible = |e: &LogEntry| -> bool {
         match e.entry_type {
-            EntryType::User | EntryType::Assistant | EntryType::System => true,
+            EntryType::User => {
+                // Skip user entries that only contain tool_result blocks
+                // (they produce no visible output and would show as empty lines).
+                e.message
+                    .as_ref()
+                    .is_none_or(|msg| has_renderable_content(&msg.content))
+            }
+            EntryType::Assistant | EntryType::System => true,
             EntryType::Progress => progress_visible,
             _ => false,
         }
@@ -307,6 +341,8 @@ fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     if entries.is_empty() {
+        // Clear pending scroll if there are no entries to snapshot.
+        app.pending_scroll = None;
         let paragraph = Paragraph::new("Waiting for log entries...")
             .style(Style::default().fg(theme.logstream_placeholder))
             .block(block);
@@ -315,7 +351,7 @@ fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Build styled lines for all entries.
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     for entry in &entries {
         let ts = format_timestamp(&entry.timestamp);
@@ -400,20 +436,55 @@ fn draw_logstream(frame: &mut Frame, app: &App, area: Rect) {
                 }
 
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    text.to_string(),
-                    Style::default().fg(color),
-                ));
+                spans.push(Span::styled(text.to_string(), Style::default().fg(color)));
 
                 lines.push(Line::from(spans));
             }
         }
     }
 
-    // Compute scroll to auto-scroll to the bottom.
-    let inner_height = block.inner(area).height;
+    // -- Branch B: pending_scroll -- create snapshot and apply pending action.
+    if let Some(pending_action) = app.pending_scroll.take() {
+        let total_lines = lines.len();
+        let mut scroll = ScrollMode {
+            lines: lines.clone(),
+            offset: 0,
+            total_lines,
+            visible_height: inner_height,
+        };
+
+        // Set initial offset to bottom (offset 0 = bottom), then apply action.
+        match pending_action {
+            crate::tui::app::PendingScroll::Up(n) => {
+                let max_offset = total_lines.saturating_sub(inner_height);
+                scroll.offset = n.min(max_offset);
+            }
+            crate::tui::app::PendingScroll::Down(_) => {
+                // Scroll down from bottom is a no-op (already at bottom).
+                scroll.offset = 0;
+            }
+            crate::tui::app::PendingScroll::ToTop => {
+                scroll.offset = total_lines.saturating_sub(inner_height);
+            }
+        }
+
+        // Convert scroll.offset (lines from bottom) to ratatui scroll (lines from top).
+        let max_ratatui = total_lines.saturating_sub(inner_height);
+        let ratatui_scroll = max_ratatui.saturating_sub(scroll.offset);
+        let paragraph = Paragraph::new(scroll.lines.clone())
+            .style(Style::default().fg(theme.logstream_text))
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((ratatui_scroll as u16, 0));
+
+        app.scroll_mode = Some(scroll);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // -- Branch C: normal auto-scroll to bottom. --
     let total_lines = lines.len() as u16;
-    let scroll_offset = total_lines.saturating_sub(inner_height);
+    let scroll_offset = total_lines.saturating_sub(inner_height as u16);
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.logstream_text))
@@ -446,10 +517,7 @@ fn format_timestamp(ts: &Option<String>) -> String {
     };
 
     // Extract HH:MM:SS (first 8 characters of the time part).
-    if time_part.len() >= 8
-        && time_part.as_bytes()[2] == b':'
-        && time_part.as_bytes()[5] == b':'
-    {
+    if time_part.len() >= 8 && time_part.as_bytes()[2] == b':' && time_part.as_bytes()[5] == b':' {
         time_part[..8].to_string()
     } else {
         fallback
@@ -497,10 +565,7 @@ fn agent_prefix(entry: &LogEntry) -> Option<String> {
 /// color from the theme's agent palette. Main-agent entries (no
 /// agent_id/slug) return the theme's main agent color.
 fn agent_color(entry: &LogEntry, theme: &ThemeColors) -> Color {
-    let key = entry
-        .slug
-        .as_deref()
-        .or(entry.agent_id.as_deref());
+    let key = entry.slug.as_deref().or(entry.agent_id.as_deref());
 
     match key {
         Some(k) => {
@@ -777,16 +842,19 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ("/", "Open filter overlay"),
         ("p", "Toggle progress entries"),
         ("t", "Open tmux panes"),
-        ("j / Down", "Select next session"),
-        ("k / Up", "Select previous session"),
+        ("j / Down", "Navigate / scroll (focus-dependent)"),
+        ("k / Up", "Navigate / scroll (focus-dependent)"),
         ("Enter", "Confirm session selection"),
+        ("PgUp / PgDn", "Page scroll (log stream)"),
+        ("g / Home", "Scroll to top (log stream)"),
+        ("G / End / Esc", "Exit scroll mode"),
     ];
 
     // Compute overlay dimensions.
     // Width: enough for the widest line, clamped to terminal width.
-    let content_width: u16 = 44; // "  Ctrl+C     Quit (force)" is ~28, title is ~18; 44 gives nice padding
+    let content_width: u16 = 52; // widest line: "  PgUp / PgDn  Page scroll (log stream)" ~42 + padding
     let overlay_width = (content_width + 4).min(area.width); // +4 for borders + padding, clamped to area
-    // Height: title(1) + blank(1) + shortcuts(11) + blank(1) + footer(1) + borders(2) = 17
+                                                             // Height: title(1) + blank(1) + shortcuts(N) + blank(1) + footer(1) + borders(2)
     let content_lines = shortcuts.len() as u16 + 4; // title + blank + shortcuts + blank + footer
     let overlay_height = (content_lines + 2).min(area.height); // +2 for borders, clamped to area
 
@@ -1190,9 +1258,7 @@ fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
             Span::raw(":yes  "),
             Span::styled(
                 "n",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::raw(":no"),
         ]),
@@ -1217,8 +1283,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
     let bar = build_status_bar_line(app, width);
 
-    let paragraph = Paragraph::new(bar)
-        .style(Style::default().bg(theme.status_bar_bg).fg(theme.status_bar_fg));
+    let paragraph = Paragraph::new(bar).style(
+        Style::default()
+            .bg(theme.status_bar_bg)
+            .fg(theme.status_bar_fg),
+    );
 
     frame.render_widget(paragraph, area);
 }
@@ -1386,13 +1455,17 @@ mod tests {
                 Agent {
                     agent_id: Some("a0d0bbc".to_string()),
                     slug: Some("effervescent-soaring-cook".to_string()),
-                    log_path: PathBuf::from("/fake/session-with-agents/subagents/agent-a0d0bbc.jsonl"),
+                    log_path: PathBuf::from(
+                        "/fake/session-with-agents/subagents/agent-a0d0bbc.jsonl",
+                    ),
                     is_main: false,
                 },
                 Agent {
                     agent_id: Some("b1e1ccd".to_string()),
                     slug: None,
-                    log_path: PathBuf::from("/fake/session-with-agents/subagents/agent-b1e1ccd.jsonl"),
+                    log_path: PathBuf::from(
+                        "/fake/session-with-agents/subagents/agent-b1e1ccd.jsonl",
+                    ),
                     is_main: false,
                 },
             ],
@@ -1808,10 +1881,8 @@ mod tests {
             "message": {"role": "user", "content": "Other session"}
         }"#;
 
-        app.ring_buffer
-            .push(parse_jsonl_line(entry_json).unwrap());
-        app.ring_buffer
-            .push(parse_jsonl_line(other_json).unwrap());
+        app.ring_buffer.push(parse_jsonl_line(entry_json).unwrap());
+        app.ring_buffer.push(parse_jsonl_line(other_json).unwrap());
 
         let mut terminal = test_terminal(80, 24);
         terminal
@@ -2264,10 +2335,12 @@ mod tests {
     fn test_extract_progress_description_content() {
         use crate::log_entry::parse_jsonl_line;
 
-        let entry = parse_jsonl_line(r#"{
+        let entry = parse_jsonl_line(
+            r#"{
             "type": "progress",
             "data": {"content": "Delegating: fix the bug"}
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         assert_eq!(
@@ -2280,10 +2353,12 @@ mod tests {
     fn test_extract_progress_description_status() {
         use crate::log_entry::parse_jsonl_line;
 
-        let entry = parse_jsonl_line(r#"{
+        let entry = parse_jsonl_line(
+            r#"{
             "type": "progress",
             "data": {"status": "thinking"}
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         assert_eq!(extract_progress_description(&entry), "thinking");
@@ -2293,10 +2368,12 @@ mod tests {
     fn test_extract_progress_description_content_priority_over_status() {
         use crate::log_entry::parse_jsonl_line;
 
-        let entry = parse_jsonl_line(r#"{
+        let entry = parse_jsonl_line(
+            r#"{
             "type": "progress",
             "data": {"content": "my content", "status": "my status"}
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         // content takes priority over status
@@ -2307,10 +2384,12 @@ mod tests {
     fn test_extract_progress_description_fallback_json() {
         use crate::log_entry::parse_jsonl_line;
 
-        let entry = parse_jsonl_line(r#"{
+        let entry = parse_jsonl_line(
+            r#"{
             "type": "progress",
             "data": {"foo": "bar", "baz": 42}
-        }"#)
+        }"#,
+        )
         .unwrap();
 
         let desc = extract_progress_description(&entry);

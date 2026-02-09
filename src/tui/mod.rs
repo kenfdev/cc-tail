@@ -72,11 +72,7 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         // Best-effort terminal restore; ignore errors.
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         original_hook(panic_info);
     }));
 }
@@ -155,7 +151,7 @@ pub fn run_tui(config: AppConfig) -> io::Result<()> {
     // -- Session discovery and replay ----------------------------------------
 
     let mut watcher_rx: Option<mpsc::Receiver<WatcherEvent>> = None;
-    let mut _watcher_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut _watcher_handle: Option<watcher::WatcherHandle> = None;
 
     let cwd = std::env::current_dir().unwrap_or_default();
     match detect_project_path(&cwd, app.config.project.as_deref()) {
@@ -185,12 +181,8 @@ pub fn run_tui(config: AppConfig) -> io::Result<()> {
 
                         // Start the file watcher from where replay left off.
                         let offsets = app.replay_offsets.clone();
-                        match watcher::start_watching(
-                            project_dir,
-                            app.config.verbose,
-                            256,
-                            offsets,
-                        ) {
+                        match watcher::start_watching(project_dir, app.config.verbose, 256, offsets)
+                        {
                             Ok((rx, handle)) => {
                                 watcher_rx = Some(rx);
                                 _watcher_handle = Some(handle);
@@ -220,9 +212,9 @@ pub fn run_tui(config: AppConfig) -> io::Result<()> {
 
     let result = run_event_loop(&mut terminal, &mut app, &shutdown_flag, &mut watcher_rx);
 
-    // Abort the watcher background task if running.
+    // Signal the watcher to shut down cleanly.
     if let Some(handle) = _watcher_handle.take() {
-        handle.abort();
+        handle.shutdown();
     }
 
     // Clean up tmux panes (best-effort).
@@ -266,10 +258,11 @@ fn run_event_loop(
         if let Some(event) = poll_crossterm_event(TICK_RATE) {
             match event {
                 AppEvent::Key(key) => app.on_key(key),
+                AppEvent::Mouse(mouse) => app.on_mouse(mouse),
                 AppEvent::Resize(_, _) => {
                     // ratatui handles resize automatically on next draw
                 }
-                AppEvent::Tick | AppEvent::NewLogEntry(_) => {}
+                AppEvent::Tick | AppEvent::NewLogEntry(_) | AppEvent::NewFileDetected(_) => {}
             }
         }
 
@@ -277,8 +270,10 @@ fn run_event_loop(
         if let Some(ref mut rx) = watcher_rx {
             let watcher_events = drain_log_entries(rx, MAX_DRAIN_PER_TICK);
             for evt in watcher_events {
-                if let AppEvent::NewLogEntry(entry) = evt {
-                    app.on_new_log_entry(*entry);
+                match evt {
+                    AppEvent::NewLogEntry(entry) => app.on_new_log_entry(*entry),
+                    AppEvent::NewFileDetected(path) => app.on_new_file_detected(path),
+                    _ => {}
                 }
             }
         }

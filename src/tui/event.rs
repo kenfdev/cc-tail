@@ -4,7 +4,8 @@
 //! watcher into a single [`AppEvent`] enum that the main loop can
 //! `match` on.
 
-use crossterm::event::{self, Event as CrosstermEvent, KeyEvent};
+use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -19,11 +20,17 @@ use crate::log_entry::LogEntry;
 pub enum AppEvent {
     /// A key was pressed.
     Key(KeyEvent),
+    /// A mouse event occurred (scroll, click, etc.).
+    Mouse(MouseEvent),
     /// The terminal was resized.
+    #[allow(dead_code)]
     Resize(u16, u16),
     /// A new log entry arrived from the file watcher.
     NewLogEntry(Box<LogEntry>),
+    /// A new JSONL file was detected by the watcher.
+    NewFileDetected(PathBuf),
     /// A periodic tick (used for UI refresh, cursor blink, etc.).
+    #[allow(dead_code)]
     Tick,
 }
 
@@ -39,6 +46,7 @@ pub fn poll_crossterm_event(timeout: Duration) -> Option<AppEvent> {
     if event::poll(timeout).ok()? {
         match event::read().ok()? {
             CrosstermEvent::Key(key) => Some(AppEvent::Key(key)),
+            CrosstermEvent::Mouse(mouse) => Some(AppEvent::Mouse(mouse)),
             CrosstermEvent::Resize(w, h) => Some(AppEvent::Resize(w, h)),
             _ => None,
         }
@@ -62,8 +70,11 @@ pub fn drain_log_entries(
             Ok(crate::watcher::WatcherEvent::NewEntry { entry, .. }) => {
                 events.push(AppEvent::NewLogEntry(entry));
             }
+            Ok(crate::watcher::WatcherEvent::NewFileDetected { path }) => {
+                events.push(AppEvent::NewFileDetected(path));
+            }
             Ok(_) => {
-                // NewFileDetected, Error — skip for now
+                // Error — skip for now
             }
             Err(_) => break,
         }
@@ -126,11 +137,8 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<WatcherEvent>(16);
 
         for i in 0..5 {
-            let entry = parse_jsonl_line(&format!(
-                r#"{{"type": "user", "sessionId": "s{}"}}"#,
-                i
-            ))
-            .unwrap();
+            let entry =
+                parse_jsonl_line(&format!(r#"{{"type": "user", "sessionId": "s{}"}}"#, i)).unwrap();
             tx.send(WatcherEvent::NewEntry {
                 source: PathBuf::from("/fake/s.jsonl"),
                 entry: Box::new(entry),
@@ -149,10 +157,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_skips_non_entry_events() {
+    async fn test_drain_converts_new_file_detected_and_skips_errors() {
         let (tx, mut rx) = mpsc::channel::<WatcherEvent>(16);
 
-        // Send a NewFileDetected event (should be skipped)
+        // Send a NewFileDetected event (should be converted)
         tx.send(WatcherEvent::NewFileDetected {
             path: PathBuf::from("/fake/new.jsonl"),
         })
@@ -174,8 +182,11 @@ mod tests {
         .unwrap();
 
         let events = drain_log_entries(&mut rx, 100);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AppEvent::NewLogEntry(e) if e.entry_type == EntryType::User));
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], AppEvent::NewFileDetected(p) if p == &PathBuf::from("/fake/new.jsonl"))
+        );
+        assert!(matches!(&events[1], AppEvent::NewLogEntry(e) if e.entry_type == EntryType::User));
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 use crate::cli::{StreamArgs, Theme};
-use crate::content_render::{render_content_blocks, RenderedLine};
+use crate::content_render::{has_renderable_content, render_content_blocks, RenderedLine};
 use crate::log_entry::{parse_jsonl_line, EntryType, LogEntry};
 use crate::replay::is_visible_type;
 use crate::watcher::{read_new_entries, FileWatchState};
@@ -69,12 +69,12 @@ impl AnsiColors {
     fn for_tty(theme: &Theme) -> Self {
         match theme {
             Theme::Dark => Self {
-                timestamp: "\x1b[90m",   // bright black (gray)
-                role_user: "\x1b[34m",   // blue
+                timestamp: "\x1b[90m",      // bright black (gray)
+                role_user: "\x1b[34m",      // blue
                 role_assistant: "\x1b[32m", // green
-                role_system: "\x1b[33m", // yellow
-                tool_use: "\x1b[33m",    // yellow
-                text: "\x1b[0m",         // default
+                role_system: "\x1b[33m",    // yellow
+                tool_use: "\x1b[33m",       // yellow
+                text: "\x1b[0m",            // default
                 reset: "\x1b[0m",
             },
             Theme::Light => Self {
@@ -197,6 +197,9 @@ fn replay_phase(config: &StreamConfig) -> Result<u64, Box<dyn std::error::Error>
     let mut out = stdout.lock();
 
     for entry in replay_entries {
+        if should_skip_entry(entry) {
+            continue;
+        }
         if print_entry(&mut out, entry, config).is_err() {
             // BrokenPipe — exit cleanly.
             std::process::exit(0);
@@ -224,11 +227,7 @@ async fn live_tail_phase(
     let (tx, mut rx) = mpsc::channel::<()>(64);
 
     // Determine the parent directory to watch.
-    let watch_path = config
-        .path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let watch_path = config.path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     let target_path = config.path.canonicalize().unwrap_or(config.path.clone());
 
@@ -241,9 +240,7 @@ async fn live_tail_phase(
                     EventKind::Modify(_) | EventKind::Create(_) => {
                         // Check if any of the event paths match our target file.
                         for path in &event.paths {
-                            let canonical = path
-                                .canonicalize()
-                                .unwrap_or_else(|_| path.clone());
+                            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
                             if canonical == target_clone {
                                 let _ = tx.blocking_send(());
                                 break;
@@ -277,6 +274,9 @@ async fn live_tail_phase(
                             if !is_visible_type(entry, config.verbose) {
                                 continue;
                             }
+                            if should_skip_entry(entry) {
+                                continue;
+                            }
                             if print_entry(&mut out, entry, config).is_err() {
                                 // BrokenPipe — exit cleanly.
                                 std::process::exit(0);
@@ -299,17 +299,31 @@ async fn live_tail_phase(
 }
 
 // ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the entry should be skipped (not printed).
+///
+/// User entries whose content consists entirely of `tool_result` blocks
+/// produce no visible output and would otherwise appear as empty lines.
+fn should_skip_entry(entry: &LogEntry) -> bool {
+    if entry.entry_type != EntryType::User {
+        return false;
+    }
+    match entry.message.as_ref() {
+        Some(msg) => !has_renderable_content(&msg.content),
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
 /// Print a single log entry to the given writer.
 ///
 /// Returns `Err` on I/O failure (typically `BrokenPipe`).
-fn print_entry<W: Write>(
-    out: &mut W,
-    entry: &LogEntry,
-    config: &StreamConfig,
-) -> io::Result<()> {
+fn print_entry<W: Write>(out: &mut W, entry: &LogEntry, config: &StreamConfig) -> io::Result<()> {
     let ts = format_timestamp(entry.timestamp.as_deref());
     let role = entry
         .message
@@ -322,8 +336,12 @@ fn print_entry<W: Write>(
     writeln!(
         out,
         "{}{}{} {}{}{}",
-        config.colors.timestamp, ts, config.colors.reset,
-        role_color, role_label, config.colors.reset,
+        config.colors.timestamp,
+        ts,
+        config.colors.reset,
+        role_color,
+        role_label,
+        config.colors.reset,
     )?;
 
     // Print content lines
@@ -416,7 +434,10 @@ fn format_timestamp(ts: Option<&str>) -> String {
             if let Some(t_pos) = s.find('T') {
                 let time_part = &s[t_pos + 1..];
                 // Extract HH:MM:SS (first 8 characters)
-                if time_part.len() >= 8 && time_part.as_bytes()[2] == b':' && time_part.as_bytes()[5] == b':' {
+                if time_part.len() >= 8
+                    && time_part.as_bytes()[2] == b':'
+                    && time_part.as_bytes()[5] == b':'
+                {
                     return time_part[..8].to_string();
                 }
             }
@@ -439,10 +460,7 @@ mod tests {
 
     #[test]
     fn test_format_timestamp_iso8601() {
-        assert_eq!(
-            format_timestamp(Some("2025-01-15T14:30:12Z")),
-            "14:30:12"
-        );
+        assert_eq!(format_timestamp(Some("2025-01-15T14:30:12Z")), "14:30:12");
     }
 
     #[test]
@@ -632,10 +650,8 @@ mod tests {
     #[test]
     fn test_print_entry_no_message() {
         let config = make_config_pipe();
-        let entry = parse_jsonl_line(
-            r#"{"type": "system", "timestamp": "2025-01-15T10:00:00Z"}"#,
-        )
-        .unwrap();
+        let entry =
+            parse_jsonl_line(r#"{"type": "system", "timestamp": "2025-01-15T10:00:00Z"}"#).unwrap();
 
         let mut buf = Vec::new();
         print_entry(&mut buf, &entry, &config).unwrap();

@@ -74,11 +74,7 @@ pub fn replay_session(
             Ok(f) => f,
             Err(e) => {
                 if verbose {
-                    eprintln!(
-                        "cc-tail: replay: skipping {}: {}",
-                        path.display(),
-                        e
-                    );
+                    eprintln!("cc-tail: replay: skipping {}: {}", path.display(), e);
                 }
                 continue;
             }
@@ -89,11 +85,7 @@ pub fn replay_session(
             Ok(m) => m.len(),
             Err(e) => {
                 if verbose {
-                    eprintln!(
-                        "cc-tail: replay: could not stat {}: {}",
-                        path.display(),
-                        e
-                    );
+                    eprintln!("cc-tail: replay: could not stat {}: {}", path.display(), e);
                 }
                 continue;
             }
@@ -107,11 +99,7 @@ pub fn replay_session(
                 Ok(l) => l,
                 Err(e) => {
                     if verbose {
-                        eprintln!(
-                            "cc-tail: replay: read error in {}: {}",
-                            path.display(),
-                            e
-                        );
+                        eprintln!("cc-tail: replay: read error in {}: {}", path.display(), e);
                     }
                     continue;
                 }
@@ -281,7 +269,12 @@ mod tests {
 
         // Write 25 user entries with sequential timestamps.
         let lines: Vec<String> = (0..25)
-            .map(|i| user_line(&format!("2025-01-15T10:{:02}:00Z", i), &format!("msg-{}", i)))
+            .map(|i| {
+                user_line(
+                    &format!("2025-01-15T10:{:02}:00Z", i),
+                    &format!("msg-{}", i),
+                )
+            })
             .collect();
         let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         write_jsonl(&log_path, &line_refs);
@@ -632,10 +625,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("session.jsonl");
 
-        write_jsonl(
-            &log_path,
-            &[&user_line("2025-01-15T10:00:00Z", "msg-1")],
-        );
+        write_jsonl(&log_path, &[&user_line("2025-01-15T10:00:00Z", "msg-1")]);
 
         let session = make_session("s1", vec![log_path]);
         let (entries, _offsets) = replay_session(&session, &default_filter(), 0, false, false);
@@ -799,10 +789,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("session.jsonl");
 
-        write_jsonl(
-            &log_path,
-            &[&user_line("2025-01-15T10:00:00Z", "only-msg")],
-        );
+        write_jsonl(&log_path, &[&user_line("2025-01-15T10:00:00Z", "only-msg")]);
 
         let session = make_session("s1", vec![log_path]);
         let (entries, _offsets) = replay_session(&session, &default_filter(), 1000, false, false);

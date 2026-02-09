@@ -55,6 +55,23 @@ pub enum SessionStatus {
     Inactive,
 }
 
+/// Classification of a newly observed file in the project directory.
+///
+/// Used by the file watcher to determine what a new file represents
+/// without performing any I/O—classification is purely path-based.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewFileKind {
+    /// A top-level session JSONL file (`{project_dir}/{session_id}.jsonl`).
+    TopLevelSession { session_id: String },
+    /// A subagent JSONL file (`{project_dir}/{session_id}/subagents/agent-{agent_id}.jsonl`).
+    Subagent {
+        session_id: String,
+        agent_id: String,
+    },
+    /// A file that does not match any known pattern.
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -308,8 +325,10 @@ pub fn resolve_session<'a>(
             }
 
             // Then try prefix match
-            let matches: Vec<&Session> =
-                sessions.iter().filter(|s| s.id.starts_with(prefix)).collect();
+            let matches: Vec<&Session> = sessions
+                .iter()
+                .filter(|s| s.id.starts_with(prefix))
+                .collect();
 
             match matches.len() {
                 0 => Err(SessionDiscoveryError::PrefixNotFound {
@@ -322,6 +341,76 @@ pub fn resolve_session<'a>(
                 }),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// New-file classification
+// ---------------------------------------------------------------------------
+
+/// Classify a newly observed file path relative to the project directory.
+///
+/// This is a pure, path-based classification with no filesystem I/O.
+/// It examines the structure of `path` relative to `project_dir` to
+/// determine whether the file represents a top-level session, a subagent
+/// log, or something unknown.
+///
+/// # Classification rules
+///
+/// 1. The file must have a `.jsonl` extension.
+/// 2. If it is a direct child of `project_dir` → `TopLevelSession`.
+/// 3. If it matches `{project_dir}/{session_id}/subagents/agent-{agent_id}.jsonl`
+///    → `Subagent`.
+/// 4. Otherwise → `Unknown`.
+pub fn classify_new_file(path: &Path, project_dir: &Path) -> NewFileKind {
+    // Must have .jsonl extension.
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("jsonl") => {}
+        _ => return NewFileKind::Unknown,
+    }
+
+    // Get the path relative to project_dir.
+    let relative = match path.strip_prefix(project_dir) {
+        Ok(rel) => rel,
+        Err(_) => return NewFileKind::Unknown,
+    };
+
+    let components: Vec<_> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+
+    match components.len() {
+        // Direct child: {session_id}.jsonl
+        1 => {
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => return NewFileKind::Unknown,
+            };
+            NewFileKind::TopLevelSession { session_id: stem }
+        }
+        // Subagent: {session_id}/subagents/agent-{agent_id}.jsonl
+        3 => {
+            let session_id = &components[0];
+            let middle = &components[1];
+            let filename_stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => return NewFileKind::Unknown,
+            };
+
+            if middle != "subagents" {
+                return NewFileKind::Unknown;
+            }
+
+            match filename_stem.strip_prefix("agent-") {
+                Some(agent_id) => NewFileKind::Subagent {
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.to_string(),
+                },
+                None => NewFileKind::Unknown,
+            }
+        }
+        _ => NewFileKind::Unknown,
     }
 }
 
@@ -505,10 +594,7 @@ mod tests {
         let tmp = setup_project_dir();
         // Create a session directory without a matching .jsonl file
         fs::create_dir_all(tmp.path().join("orphan-session").join("subagents")).unwrap();
-        create_jsonl_file(
-            tmp.path(),
-            "orphan-session/subagents/agent-abc.jsonl",
-        );
+        create_jsonl_file(tmp.path(), "orphan-session/subagents/agent-abc.jsonl");
         // Also create a valid session
         create_jsonl_file(tmp.path(), "valid-session.jsonl");
 
@@ -747,8 +833,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
 
         // The last_modified should be at least as recent as each individual file
-        let main_mtime =
-            file_modified_time(&tmp.path().join("sess-mtime.jsonl"));
+        let main_mtime = file_modified_time(&tmp.path().join("sess-mtime.jsonl"));
         let sub_mtime = file_modified_time(
             &tmp.path()
                 .join("sess-mtime")
@@ -847,5 +932,132 @@ mod tests {
                 .join("subagents")
                 .join("agent-xyz.jsonl")
         );
+    }
+
+    // ========================================================================
+    // classify_new_file tests
+    // ========================================================================
+
+    // -- 26. Top-level session classification ---------------------------------
+
+    #[test]
+    fn test_classify_top_level_session() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir.join("abc123.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(
+            result,
+            NewFileKind::TopLevelSession {
+                session_id: "abc123".to_string()
+            }
+        );
+    }
+
+    // -- 27. Subagent classification ------------------------------------------
+
+    #[test]
+    fn test_classify_subagent() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir
+            .join("sess-001")
+            .join("subagents")
+            .join("agent-a0d0bbc.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(
+            result,
+            NewFileKind::Subagent {
+                session_id: "sess-001".to_string(),
+                agent_id: "a0d0bbc".to_string(),
+            }
+        );
+    }
+
+    // -- 28. Non-jsonl file returns Unknown -----------------------------------
+
+    #[test]
+    fn test_classify_non_jsonl_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir.join("session.json");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 29. Nested file not matching subagent pattern returns Unknown --------
+
+    #[test]
+    fn test_classify_nested_non_subagent_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir.join("sess").join("other").join("agent-x.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 30. Path not under project_dir returns Unknown -----------------------
+
+    #[test]
+    fn test_classify_outside_project_dir_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = Path::new("/other/location/session.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 31. Subagent without agent- prefix returns Unknown -------------------
+
+    #[test]
+    fn test_classify_subagent_without_agent_prefix_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir
+            .join("sess-001")
+            .join("subagents")
+            .join("not-an-agent.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 32. Middle directory not "subagents" returns Unknown ------------------
+
+    #[test]
+    fn test_classify_wrong_middle_dir_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir
+            .join("sess-001")
+            .join("logs")
+            .join("agent-abc.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 33. Deeper nesting returns Unknown -----------------------------------
+
+    #[test]
+    fn test_classify_deep_nesting_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir
+            .join("sess-001")
+            .join("subagents")
+            .join("nested")
+            .join("agent-abc.jsonl");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
+    }
+
+    // -- 34. No extension returns Unknown -------------------------------------
+
+    #[test]
+    fn test_classify_no_extension_is_unknown() {
+        let project_dir = Path::new("/projects/my-project/.claude");
+        let path = project_dir.join("session");
+
+        let result = classify_new_file(&path, project_dir);
+        assert_eq!(result, NewFileKind::Unknown);
     }
 }
