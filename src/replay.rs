@@ -46,8 +46,6 @@ pub const DEFAULT_REPLAY_COUNT: usize = 20;
 /// * `max_visible`      - Maximum number of visible entries to return (default 20).
 /// * `verbose`          - If `true`, emit diagnostic messages to stderr for
 ///   missing/unreadable files and parse errors.
-/// * `progress_visible` - If `true`, include `Progress` entries in the visible
-///   set. `FileHistorySnapshot` entries remain always hidden.
 ///
 /// # Returns
 ///
@@ -61,7 +59,6 @@ pub fn replay_session(
     filter: &FilterState,
     max_visible: usize,
     verbose: bool,
-    progress_visible: bool,
 ) -> (Vec<LogEntry>, HashMap<PathBuf, u64>) {
     let mut all_visible: Vec<LogEntry> = Vec::new();
     let mut eof_offsets: HashMap<PathBuf, u64> = HashMap::new();
@@ -125,9 +122,8 @@ pub fn replay_session(
                 }
             };
 
-            // Visibility check: entry type must be User, Assistant, or System
-            // (and optionally Progress when progress_visible is true).
-            if !is_visible_type(&entry, progress_visible) {
+            // Visibility check: entry type must be User, Assistant, or System.
+            if !is_visible_type(&entry) {
                 continue;
             }
 
@@ -160,15 +156,13 @@ pub fn replay_session(
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if the entry type is one that should be shown to the user
-/// during replay: User, Assistant, or System (and optionally Progress when
-/// `progress_visible` is true). `FileHistorySnapshot` entries are always
-/// hidden regardless of any flag.
-pub(crate) fn is_visible_type(entry: &LogEntry, progress_visible: bool) -> bool {
-    match entry.entry_type {
-        EntryType::User | EntryType::Assistant | EntryType::System => true,
-        EntryType::Progress => progress_visible,
-        _ => false,
-    }
+/// during replay: User, Assistant, or System. Progress and
+/// `FileHistorySnapshot` entries are always hidden.
+pub(crate) fn is_visible_type(entry: &LogEntry) -> bool {
+    matches!(
+        entry.entry_type,
+        EntryType::User | EntryType::Assistant | EntryType::System
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +274,7 @@ mod tests {
         write_jsonl(&log_path, &line_refs);
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(entries.len(), 20);
         // Should be the last 20 (indices 5..25)
@@ -321,7 +315,7 @@ mod tests {
         );
 
         let session = make_session("s1", vec![main_path, sub_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(entries.len(), 4);
         // Verify sorted by timestamp
@@ -365,7 +359,7 @@ mod tests {
         filter.set_pattern("hello");
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &filter, 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &filter, 20, false);
 
         // Only entries matching "hello" should be returned
         assert_eq!(entries.len(), 2);
@@ -397,7 +391,7 @@ mod tests {
         );
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         // Only 2 visible entries, should return all 2
         assert_eq!(entries.len(), 2);
@@ -414,7 +408,7 @@ mod tests {
         write_jsonl(&log_path, &[]);
 
         let session = make_session("s1", vec![log_path.clone()]);
-        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert!(entries.is_empty());
         // EOF offset should still be recorded (0 for empty file)
@@ -430,7 +424,7 @@ mod tests {
         let log_path = PathBuf::from("/nonexistent/path/session.jsonl");
 
         let session = make_session("s1", vec![log_path.clone()]);
-        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert!(entries.is_empty());
         // Missing file should not have an EOF offset
@@ -463,47 +457,13 @@ mod tests {
         );
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         // Only User, Assistant, and System should be visible
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].entry_type, EntryType::User);
         assert_eq!(entries[1].entry_type, EntryType::Assistant);
         assert_eq!(entries[2].entry_type, EntryType::System);
-    }
-
-    // =====================================================================
-    // Test 7b: Progress entries visible when progress_visible = true
-    // =====================================================================
-
-    #[test]
-    fn test_progress_visible_includes_progress_entries() {
-        let tmp = TempDir::new().unwrap();
-        let log_path = tmp.path().join("session.jsonl");
-
-        write_jsonl(
-            &log_path,
-            &[
-                &user_line("2025-01-15T10:00:00Z", "user msg"),
-                &progress_line("2025-01-15T10:01:00Z"),
-                &assistant_line("2025-01-15T10:02:00Z", "assistant msg"),
-                &format!(
-                    r#"{{"type": "file-history-snapshot", "timestamp": "2025-01-15T10:03:00Z"}}"#
-                ),
-                &system_line("2025-01-15T10:04:00Z", "system msg"),
-            ],
-        );
-
-        let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, true);
-
-        // User, Progress, Assistant, and System should be visible;
-        // file-history-snapshot always hidden
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].entry_type, EntryType::User);
-        assert_eq!(entries[1].entry_type, EntryType::Progress);
-        assert_eq!(entries[2].entry_type, EntryType::Assistant);
-        assert_eq!(entries[3].entry_type, EntryType::System);
     }
 
     // =====================================================================
@@ -525,7 +485,7 @@ mod tests {
         );
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(entries.len(), 3);
         // Entry without timestamp should sort first (empty string < any timestamp)
@@ -556,7 +516,7 @@ mod tests {
         let expected_len = std::fs::metadata(&log_path).unwrap().len();
 
         let session = make_session("s1", vec![log_path.clone()]);
-        let (_entries, offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (_entries, offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(offsets.get(&log_path), Some(&expected_len));
     }
@@ -584,7 +544,7 @@ mod tests {
         let sub_len = std::fs::metadata(&sub_path).unwrap().len();
 
         let session = make_session("s1", vec![main_path.clone(), sub_path.clone()]);
-        let (_entries, offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (_entries, offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(offsets.len(), 2);
         assert_eq!(offsets.get(&main_path), Some(&main_len));
@@ -611,7 +571,7 @@ mod tests {
         );
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(entries.len(), 2);
     }
@@ -628,7 +588,7 @@ mod tests {
         write_jsonl(&log_path, &[&user_line("2025-01-15T10:00:00Z", "msg-1")]);
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 0, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 0, false);
 
         assert!(entries.is_empty());
     }
@@ -651,7 +611,7 @@ mod tests {
         );
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 1, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 1, false);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(
@@ -682,7 +642,7 @@ mod tests {
         filter.enabled_roles.insert("assistant".to_string());
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &filter, 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &filter, 20, false);
 
         // Only assistant-role entries should pass the role filter
         assert_eq!(entries.len(), 1);
@@ -701,7 +661,7 @@ mod tests {
             last_modified: SystemTime::now(),
         };
 
-        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert!(entries.is_empty());
         assert!(offsets.is_empty());
@@ -724,7 +684,7 @@ mod tests {
         writeln!(file, "{}", user_line("2025-01-15T10:01:00Z", "msg-2")).unwrap();
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, false);
 
         assert_eq!(entries.len(), 2);
     }
@@ -743,27 +703,13 @@ mod tests {
         let queue = parse_jsonl_line(r#"{"type": "queue-operation"}"#).unwrap();
         let unknown = parse_jsonl_line(r#"{"type": "some-future-type"}"#).unwrap();
 
-        // With progress_visible = false (default)
-        assert!(is_visible_type(&user, false));
-        assert!(is_visible_type(&assistant, false));
-        assert!(is_visible_type(&system, false));
-        assert!(!is_visible_type(&progress, false));
-        assert!(!is_visible_type(&fhs, false));
-        assert!(!is_visible_type(&queue, false));
-        assert!(!is_visible_type(&unknown, false));
-    }
-
-    #[test]
-    fn test_is_visible_type_progress_visible() {
-        let progress = parse_jsonl_line(r#"{"type": "progress"}"#).unwrap();
-        let fhs = parse_jsonl_line(r#"{"type": "file-history-snapshot"}"#).unwrap();
-        let user = parse_jsonl_line(r#"{"type": "user"}"#).unwrap();
-
-        // With progress_visible = true
-        assert!(is_visible_type(&progress, true));
-        assert!(is_visible_type(&user, true));
-        // file-history-snapshot always hidden
-        assert!(!is_visible_type(&fhs, true));
+        assert!(is_visible_type(&user));
+        assert!(is_visible_type(&assistant));
+        assert!(is_visible_type(&system));
+        assert!(!is_visible_type(&progress));
+        assert!(!is_visible_type(&fhs));
+        assert!(!is_visible_type(&queue));
+        assert!(!is_visible_type(&unknown));
     }
 
     // =====================================================================
@@ -776,7 +722,7 @@ mod tests {
         let session = make_session("s1", vec![log_path]);
 
         // Should not panic; verbose=true just prints to stderr
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, true, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 20, true);
         assert!(entries.is_empty());
     }
 
@@ -792,7 +738,7 @@ mod tests {
         write_jsonl(&log_path, &[&user_line("2025-01-15T10:00:00Z", "only-msg")]);
 
         let session = make_session("s1", vec![log_path]);
-        let (entries, _offsets) = replay_session(&session, &default_filter(), 1000, false, false);
+        let (entries, _offsets) = replay_session(&session, &default_filter(), 1000, false);
 
         assert_eq!(entries.len(), 1);
     }

@@ -109,7 +109,7 @@ Set up ratatui with crossterm, implement the three-panel layout (sidebar, log st
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | Layout proportions, focus model (sidebar vs log stream), tick rate, channel draining strategy |
-| Implement | `[x]` | `tui/mod.rs` (374 lines), `tui/app.rs` (1,772 lines), `tui/event.rs` (200 lines). Terminal setup/restore with panic hook. Main loop: poll crossterm events + drain mpsc channel → update state → render. Layout: sidebar (30 cols fixed) + log stream (flex) + status bar (1 row). Focus toggle with `Tab`. Sidebar toggle with `b`. App state struct with 15+ fields. |
+| Implement | `[x]` | `tui/mod.rs` (374 lines), `tui/app.rs` (1,772 lines), `tui/event.rs` (200 lines). Terminal setup/restore with panic hook. Main loop: poll crossterm events + drain mpsc channel → update state → render. Layout: sidebar (30 cols fixed) + log stream (flex) + status bar (1 row). Focus toggle with `Tab`. Sidebar toggle with `b`. App state struct with 15+ fields. Default focus on Sidebar; `Enter` confirms session selection without switching focus. |
 | Review | `[x]` | Implementation wired and functional. Manual testing: resize behavior, focus switching, clean terminal restore on exit. |
 
 ---
@@ -174,15 +174,15 @@ On startup and session switch, replay the last 20 visible messages from the JSON
 
 ---
 
-## 15. Progress Entry Toggle
+## 15. Progress Entry Toggle (REMOVED)
 
-Toggle visibility of `progress` type entries via `p` key (independent of `--verbose`).
+The `p` keyboard shortcut and progress entry toggle feature have been removed. Progress entries are now always hidden.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | State management for toggle, interaction with filter system, display format |
-| Implement | `[x]` | `progress_visible` flag in App. `p` key handler toggles visibility. `replay_session()` respects `progress_visible` parameter. Toggle triggers ring buffer re-render. `file-history-snapshot` always hidden. |
-| Review | `[x]` | Manual testing: toggle behavior, interaction with other filters. |
+| Implement | `[x]` | **REMOVED**: `progress_visible` field, `p` key handler, and `toggle_progress_visible()` method removed from App. `is_visible_type()` hardcodes `Progress => false`. Progress entries always hidden. |
+| Review | `[x]` | Feature removed; all references cleaned from replay.rs, stream.rs, app.rs, ui.rs. |
 
 ---
 
@@ -217,7 +217,7 @@ Spawn per-agent tmux panes running `cc-tail stream`, manage pane lifecycle, and 
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | `Multiplexer` trait design, `TmuxBackend` implementation, pane lifecycle on session switch, cleanup strategy |
-| Implement | `[x]` | `tmux.rs`. `TmuxManager` struct. `Multiplexer` trait for backends. `TmuxBackend` with pane spawning. `$TMUX` env detection. Session naming with hash (`cc-tail-<project-hash>`). Layout application (tiled). Pane lifecycle management. Error handling (NotInstalled, NotInsideTmux). Track pane IDs for cleanup. Non-tmux: show info message. |
+| Implement | `[x]` | `tmux.rs`. `TmuxManager` struct. `Multiplexer` trait for backends. `TmuxBackend` with pane spawning. `$TMUX` env detection. Session naming with hash (`cc-tail-<project-hash>`). Layout application (tiled). Pane lifecycle management. Error handling (NotInstalled, NotInsideTmux). Track pane IDs for cleanup. Non-tmux: show info message. `T` key closes all tmux panes via `close_tmux_panes()` without quitting TUI. |
 | Review | `[x]` | Manual testing: pane creation, layout, new subagent pane, session switch behavior, cleanup on exit. |
 
 ---
@@ -241,7 +241,7 @@ Show a static keyboard shortcut reference on `?` key press.
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | Overlay layout, shortcut list content |
-| Implement | `[x]` | `tui/app.rs` + `tui/ui.rs`. `help_overlay_visible` flag in App. `draw_help_overlay()` renders keybindings modal. `?` key handler toggles. Displays 20+ keybindings. Clear widget for modal overlay. Any key dismisses. |
+| Implement | `[x]` | `tui/app.rs` + `tui/ui.rs`. `help_overlay_visible` flag in App. `draw_help_overlay()` renders keybindings modal. `?` key handler toggles. Displays 20+ keybindings including `u/d` (half-page scroll) and `T` (close tmux panes). Clear widget for modal overlay. Any key dismisses. |
 | Review | `[x]` | Manual testing: overlay appearance, dismissal, terminal size edge cases. |
 
 ---
@@ -253,8 +253,8 @@ Freeze the log stream and scroll through history with keyboard/mouse, using a tw
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | Two-phase scroll entry (pending_scroll → render snapshot → active scroll_mode), focus-aware key dispatch, mouse scroll support |
-| Implement | `[x]` | `tui/app.rs`: `PendingScroll` enum, `ScrollMode` struct, `scroll_mode`/`pending_scroll` fields on App, `enter_scroll_mode()`/`exit_scroll_mode()`/`apply_scroll()`/`is_in_scroll_mode()`/`on_mouse()` methods. Focus-aware `on_key()` dispatch (Up/Down/j/k/PageUp/PageDown/g/G/Home/End/Esc). Scroll reset on session switch and filter apply. `tui/event.rs`: `Mouse(MouseEvent)` variant in `AppEvent`, crossterm mouse event propagation. `tui/mod.rs`: mouse dispatch in event loop. `tui/ui.rs`: three-branch `draw_logstream()` (scroll_mode active → render snapshot; pending_scroll → build lines, snapshot, apply; normal → auto-scroll). Dynamic title `[SCROLL mode - Esc:exit]`. Help overlay updated with scroll keybindings. 30+ tests. |
-| Review | `[x]` | Code quality review: APPROVED (well-structured, 50+ new unit tests, 648 total passing, zero clippy warnings). Security review: APPROVED (no vulnerabilities found). |
+| Implement | `[x]` | `tui/app.rs`: `PendingScroll` enum (Up/Down/ToTop/HalfPageUp/HalfPageDown), `ScrollMode` struct, `scroll_mode`/`pending_scroll` fields on App, `enter_scroll_mode()`/`exit_scroll_mode()`/`apply_scroll()`/`is_in_scroll_mode()`/`on_mouse()` methods. Focus-aware `on_key()` dispatch (Up/Down/j/k/PageUp/PageDown/u/d/g/G/Home/End/Esc). `u`/`d` keys for half-page scroll. Scroll reset on session switch and filter apply. `tui/event.rs`: `Mouse(MouseEvent)` variant in `AppEvent`, crossterm mouse event propagation. `tui/mod.rs`: mouse dispatch in event loop. `tui/ui.rs`: three-branch `draw_logstream()` (scroll_mode active → render snapshot; pending_scroll → build lines, snapshot, apply; normal → auto-scroll). Dynamic title `[SCROLL mode - Esc:exit]`. Help overlay updated with scroll keybindings. 30+ tests. |
+| Review | `[x]` | Code quality review: APPROVED (well-structured, 50+ new unit tests, 659 total passing, zero clippy warnings). Security review: APPROVED (no vulnerabilities found). |
 
 ---
 
@@ -266,7 +266,7 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 |-------|--------|-------|
 | Plan | `[x]` | CI matrix (macOS + Linux, x86_64 + aarch64), release workflow triggers, artifact naming |
 | Implement | `[x]` | `.github/workflows/ci.yml`: 3-target matrix (macos-latest, ubuntu-latest, ubuntu-24.04-arm) with fmt, clippy, test, build. Linux targets use musl (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) for fully static binaries. `.github/workflows/release.yml`: triggered on `v*` tags, builds release binaries with `--target` flag, creates GitHub Release via `softprops/action-gh-release`. `install.sh`: maps Linux to `linux-musl` target. `Cargo.toml`: renamed to `cctail`, added repository/readme/keywords/categories metadata. `README.md`: installation (cargo install + binary download), usage, key bindings. |
-| Review | `[x]` | `cargo fmt --check` passes, `cargo clippy -- -D warnings` passes, `cargo test` (648 tests OK), `cargo publish --dry-run` succeeds. |
+| Review | `[x]` | `cargo fmt --check` passes, `cargo clippy -- -D warnings` passes, `cargo test` (659 tests OK), `cargo publish --dry-run` succeeds. |
 
 ---
 
@@ -288,7 +288,7 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 | 12 | Status Bar | `[x]` | `[x]` | `[x]` |
 | 13 | Filter System & Overlay | `[x]` | `[x]` | `[x]` |
 | 14 | Session Replay | `[x]` | `[x]` | `[x]` |
-| 15 | Progress Entry Toggle | `[x]` | `[x]` | `[x]` |
+| 15 | Progress Entry Toggle (REMOVED) | `[x]` | `[x]` | `[x]` |
 | 16 | Theme Support | `[x]` | `[x]` | `[x]` |
 | 17 | `stream` Subcommand | `[x]` | `[x]` | `[x]` |
 | 18 | tmux Integration | `[x]` | `[x]` | `[x]` |

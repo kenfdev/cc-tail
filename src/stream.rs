@@ -182,7 +182,7 @@ fn replay_phase(config: &StreamConfig) -> Result<u64, Box<dyn std::error::Error>
             }
         };
 
-        if !is_visible_type(&entry, config.verbose) {
+        if !is_visible_type(&entry) {
             continue;
         }
 
@@ -271,7 +271,7 @@ async fn live_tail_phase(
                         let entries = read_new_entries(&config.path, &mut state, config.verbose);
                         let mut out = stdout.lock();
                         for entry in &entries {
-                            if !is_visible_type(entry, config.verbose) {
+                            if !is_visible_type(entry) {
                                 continue;
                             }
                             if should_skip_entry(entry) {

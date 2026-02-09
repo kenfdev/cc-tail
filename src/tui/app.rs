@@ -105,6 +105,10 @@ pub enum PendingScroll {
     Down(usize),
     /// Jump to the top of the log stream.
     ToTop,
+    /// Scroll up by half a page.
+    HalfPageUp,
+    /// Scroll down by half a page.
+    HalfPageDown,
 }
 
 /// State for the scroll (freeze) mode in the log stream panel.
@@ -166,9 +170,6 @@ pub struct App {
     /// Per-file EOF offsets from the last replay, used to hand off to the
     /// watcher so it starts tailing from where replay left off.
     pub replay_offsets: HashMap<PathBuf, u64>,
-    /// Whether progress-type entries are visible in the log stream.
-    /// Toggled independently of `--verbose` via the `p` key.
-    pub progress_visible: bool,
     /// tmux pane lifecycle manager.
     pub tmux_manager: TmuxManager,
     /// Transient status message shown in the status bar (e.g. tmux feedback).
@@ -195,7 +196,7 @@ impl App {
     /// Create a new `App` with the given config.
     ///
     /// Starts with:
-    /// - Focus on `LogStream`
+    /// - Focus on `Sidebar`
     /// - Sidebar visible
     /// - `should_quit = false`
     /// - Default-budget ring buffer
@@ -204,7 +205,7 @@ impl App {
         let theme_colors = ThemeColors::from_theme(&config.theme);
         let tmux_layout = config.tmux.layout.clone();
         Self {
-            focus: Focus::LogStream,
+            focus: Focus::Sidebar,
             sidebar_visible: true,
             should_quit: false,
             config,
@@ -219,7 +220,6 @@ impl App {
             filter_state: FilterState::default(),
             filter_overlay: FilterOverlayState::default(),
             replay_offsets: HashMap::new(),
-            progress_visible: false,
             tmux_manager: TmuxManager::new(tmux_layout),
             status_message: None,
             quit_confirm_pending: false,
@@ -301,12 +301,12 @@ impl App {
                 self.open_filter_overlay();
                 return;
             }
-            KeyCode::Char('p') => {
-                self.toggle_progress_visible();
-                return;
-            }
             KeyCode::Char('t') => {
                 self.open_tmux_panes();
+                return;
+            }
+            KeyCode::Char('T') => {
+                self.close_tmux_panes();
                 return;
             }
             KeyCode::Tab => {
@@ -346,6 +346,14 @@ impl App {
                 KeyCode::PageDown => {
                     if self.is_in_scroll_mode() {
                         self.apply_scroll(PendingScroll::Down(20));
+                    }
+                }
+                KeyCode::Char('u') => {
+                    self.enter_scroll_mode(PendingScroll::HalfPageUp);
+                }
+                KeyCode::Char('d') => {
+                    if self.is_in_scroll_mode() {
+                        self.apply_scroll(PendingScroll::HalfPageDown);
                     }
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
@@ -459,6 +467,21 @@ impl App {
         }
     }
 
+    /// Handle the `T` key: close all tmux panes without quitting the TUI.
+    fn close_tmux_panes(&mut self) {
+        let count = self.tmux_manager.pane_count();
+        if count == 0 {
+            self.status_message = Some("No tmux panes to close".to_string());
+            return;
+        }
+        self.tmux_manager.cleanup();
+        self.status_message = Some(format!(
+            "tmux: closed {} pane{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+
     // -- Focus ---------------------------------------------------------------
 
     /// Toggle focus between Sidebar and LogStream.
@@ -488,16 +511,6 @@ impl App {
         if !self.sidebar_visible && self.focus == Focus::Sidebar {
             self.focus = Focus::LogStream;
         }
-    }
-
-    // -- Progress visibility ------------------------------------------------
-
-    /// Toggle visibility of progress-type entries.
-    ///
-    /// Independent of the `--verbose` flag. When toggled, the UI re-renders
-    /// to include or exclude progress entries from the log stream.
-    pub fn toggle_progress_visible(&mut self) {
-        self.progress_visible = !self.progress_visible;
     }
 
     // -- Scroll mode ---------------------------------------------------------
@@ -551,6 +564,20 @@ impl App {
                 PendingScroll::ToTop => {
                     sm.offset = max_offset;
                 }
+                PendingScroll::HalfPageUp => {
+                    let half = sm.visible_height / 2;
+                    sm.offset = sm.offset.saturating_add(half).min(max_offset);
+                }
+                PendingScroll::HalfPageDown => {
+                    if sm.offset == 0 {
+                        // Already at bottom, exit scroll mode.
+                        self.scroll_mode = None;
+                        self.pending_scroll = None;
+                        return;
+                    }
+                    let half = sm.visible_height / 2;
+                    sm.offset = sm.offset.saturating_sub(half);
+                }
             }
         }
     }
@@ -603,8 +630,8 @@ impl App {
     /// Confirm the currently selected session (Enter key).
     ///
     /// Sets the active session ID, removes it from the new-session highlight
-    /// set, switches focus to the LogStream, and replays the session's
-    /// recent messages into the ring buffer.
+    /// set, and replays the session's recent messages into the ring buffer.
+    /// Focus is NOT changed; use Tab to switch focus explicitly.
     pub fn confirm_session_selection(&mut self) {
         if self.sessions.is_empty() {
             return;
@@ -617,7 +644,6 @@ impl App {
         self.new_session_ids.remove(&session.id);
 
         self.active_session_id = Some(session.id.clone());
-        self.focus = Focus::LogStream;
 
         // Exit scroll mode when switching sessions.
         self.exit_scroll_mode();
@@ -638,7 +664,6 @@ impl App {
             &self.filter_state,
             DEFAULT_REPLAY_COUNT,
             self.config.verbose,
-            self.progress_visible,
         );
         for entry in entries {
             self.ring_buffer.push(entry);
@@ -881,12 +906,11 @@ mod tests {
     #[test]
     fn test_new_defaults() {
         let app = App::new(test_config());
-        assert_eq!(app.focus, Focus::LogStream);
+        assert_eq!(app.focus, Focus::Sidebar);
         assert!(app.sidebar_visible);
         assert!(!app.should_quit);
         assert!(app.sessions.is_empty());
         assert_eq!(app.selected_session_index, 0);
-        assert!(!app.progress_visible);
     }
 
     // -- toggle_focus --------------------------------------------------------
@@ -989,13 +1013,13 @@ mod tests {
     #[test]
     fn test_on_key_tab_toggles_focus() {
         let mut app = App::new(test_config());
-        assert_eq!(app.focus, Focus::LogStream);
-
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Sidebar);
 
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::LogStream);
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Sidebar);
     }
 
     // -- on_key: b -----------------------------------------------------------
@@ -1145,13 +1169,13 @@ mod tests {
     }
 
     #[test]
-    fn test_confirm_session_selection_switches_focus_to_logstream() {
+    fn test_confirm_session_selection_keeps_focus_on_sidebar() {
         let mut app = App::new(test_config());
         app.sessions = vec![dummy_session("s1")];
         app.focus = Focus::Sidebar;
 
         app.confirm_session_selection();
-        assert_eq!(app.focus, Focus::LogStream);
+        assert_eq!(app.focus, Focus::Sidebar);
     }
 
     #[test]
@@ -1189,7 +1213,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(app.active_session_id, Some("s2".to_string()));
-        assert_eq!(app.focus, Focus::LogStream);
+        assert_eq!(app.focus, Focus::Sidebar);
     }
 
     // -- adjust_sidebar_scroll -----------------------------------------------
@@ -1574,45 +1598,6 @@ mod tests {
 
         assert!(!app.filter_state.is_active());
         assert!(app.active_filters.is_empty());
-    }
-
-    // -- toggle_progress_visible ---------------------------------------------
-
-    #[test]
-    fn test_toggle_progress_visible() {
-        let mut app = App::new(test_config());
-        assert!(!app.progress_visible);
-
-        app.toggle_progress_visible();
-        assert!(app.progress_visible);
-
-        app.toggle_progress_visible();
-        assert!(!app.progress_visible);
-    }
-
-    #[test]
-    fn test_on_key_p_toggles_progress_visible() {
-        let mut app = App::new(test_config());
-        assert!(!app.progress_visible);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert!(app.progress_visible);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert!(!app.progress_visible);
-    }
-
-    #[test]
-    fn test_p_key_does_not_toggle_when_overlay_is_open() {
-        let mut app = App::new(test_config());
-        // Open the overlay
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
-
-        // 'p' inside overlay should type into the pattern input, not toggle progress
-        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert!(!app.progress_visible);
-        assert_eq!(app.filter_overlay.pattern_input, "p");
     }
 
     // -- tmux integration tests -----------------------------------------------
@@ -2320,5 +2305,112 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(app.pending_scroll.is_none());
+    }
+
+    // -- Half-page scroll (u/d) tests ----------------------------------------
+
+    #[test]
+    fn test_u_key_on_logstream_sets_pending_half_page_up() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(app.pending_scroll, Some(PendingScroll::HalfPageUp));
+    }
+
+    #[test]
+    fn test_d_key_on_logstream_no_scroll_mode_is_noop() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.pending_scroll.is_none());
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_d_key_on_logstream_in_scroll_mode() {
+        // total=100, visible=20, offset=15 => half=10, new offset=5
+        let mut app = app_with_scroll_mode(15, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 5);
+    }
+
+    #[test]
+    fn test_apply_scroll_half_page_up() {
+        // total=100, visible=20 => max_offset=80, half=10
+        let mut app = app_with_scroll_mode(5, 100, 20);
+        app.apply_scroll(PendingScroll::HalfPageUp);
+        // 5 + 10 = 15
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 15);
+    }
+
+    #[test]
+    fn test_apply_scroll_half_page_up_clamps_to_max() {
+        // total=30, visible=20 => max_offset=10, half=10
+        let mut app = app_with_scroll_mode(5, 30, 20);
+        app.apply_scroll(PendingScroll::HalfPageUp);
+        // 5 + 10 = 15, clamped to 10
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 10);
+    }
+
+    #[test]
+    fn test_apply_scroll_half_page_down() {
+        // total=100, visible=20, offset=15 => half=10, new offset=5
+        let mut app = app_with_scroll_mode(15, 100, 20);
+        app.apply_scroll(PendingScroll::HalfPageDown);
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 5);
+    }
+
+    #[test]
+    fn test_apply_scroll_half_page_down_at_zero_exits_scroll_mode() {
+        let mut app = app_with_scroll_mode(0, 100, 20);
+        app.apply_scroll(PendingScroll::HalfPageDown);
+        assert!(app.scroll_mode.is_none());
+    }
+
+    #[test]
+    fn test_apply_scroll_half_page_down_saturating() {
+        // total=100, visible=20, offset=3 => half=10, 3-10 saturates to 0
+        let mut app = app_with_scroll_mode(3, 100, 20);
+        app.apply_scroll(PendingScroll::HalfPageDown);
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 0);
+    }
+
+    #[test]
+    fn test_u_key_in_scroll_mode_applies_half_page_up() {
+        // total=100, visible=20, offset=5 => half=10, new offset=15
+        let mut app = app_with_scroll_mode(5, 100, 20);
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 15);
+    }
+
+    // -- Close tmux panes (T) tests ------------------------------------------
+
+    #[test]
+    fn test_capital_t_key_no_panes_shows_status() {
+        let mut app = App::new(test_config());
+        assert_eq!(app.tmux_manager.pane_count(), 0);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+
+        assert!(app.status_message.is_some());
+        let msg = app.status_message.as_ref().unwrap();
+        assert!(
+            msg.contains("No tmux panes"),
+            "expected 'No tmux panes' message, got: {}",
+            msg
+        );
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_capital_t_key_does_not_work_when_overlay_is_open() {
+        let mut app = App::new(test_config());
+        // Open the filter overlay.
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.filter_overlay.visible);
+
+        // 'T' inside overlay should type into the pattern input.
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert_eq!(app.filter_overlay.pattern_input, "T");
     }
 }

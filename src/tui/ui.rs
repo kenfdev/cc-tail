@@ -306,11 +306,9 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // -- Build lines from the ring buffer (used by both Branch B and C). --
     let filter_state = &app.filter_state;
-    let progress_visible = app.progress_visible;
 
     // Entry-type visibility predicate: User, Assistant, System are always
-    // visible; Progress is visible only when toggled on via `p` key.
-    // FileHistorySnapshot and other types are always hidden.
+    // visible; Progress, FileHistorySnapshot and other types are always hidden.
     let is_type_visible = |e: &LogEntry| -> bool {
         match e.entry_type {
             EntryType::User => {
@@ -321,7 +319,6 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
                     .is_none_or(|msg| has_renderable_content(&msg.content))
             }
             EntryType::Assistant | EntryType::System => true,
-            EntryType::Progress => progress_visible,
             _ => false,
         }
     };
@@ -465,6 +462,15 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             crate::tui::app::PendingScroll::ToTop => {
                 scroll.offset = total_lines.saturating_sub(inner_height);
+            }
+            crate::tui::app::PendingScroll::HalfPageUp => {
+                let half = inner_height / 2;
+                let max_offset = total_lines.saturating_sub(inner_height);
+                scroll.offset = half.min(max_offset);
+            }
+            crate::tui::app::PendingScroll::HalfPageDown => {
+                // Scroll down from bottom is a no-op (already at bottom).
+                scroll.offset = 0;
             }
         }
 
@@ -840,14 +846,15 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ("Tab", "Toggle focus between panels"),
         ("b", "Toggle sidebar"),
         ("/", "Open filter overlay"),
-        ("p", "Toggle progress entries"),
         ("t", "Open tmux panes"),
         ("j / Down", "Navigate / scroll (focus-dependent)"),
         ("k / Up", "Navigate / scroll (focus-dependent)"),
         ("Enter", "Confirm session selection"),
+        ("u / d", "Half-page scroll (log stream)"),
         ("PgUp / PgDn", "Page scroll (log stream)"),
         ("g / Home", "Scroll to top (log stream)"),
         ("G / End / Esc", "Exit scroll mode"),
+        ("T", "Close tmux panes"),
     ];
 
     // Compute overlay dimensions.
@@ -935,9 +942,9 @@ const SEPARATOR_WIDTH: usize = 3;
 
 /// Build the keyboard shortcuts segment text.
 ///
-/// Returns the full shortcuts string like `" q:quit Tab:focus b:sidebar /:filter p:progress t:tmux ?:help"`.
+/// Returns the full shortcuts string like `" q:quit Tab:focus b:sidebar /:filter t:tmux ?:help"`.
 fn shortcuts_text() -> String {
-    " q:quit Tab:focus b:sidebar /:filter p:progress t:tmux ?:help".to_string()
+    " q:quit Tab:focus b:sidebar /:filter t:tmux ?:help".to_string()
 }
 
 /// Build the session info segment text.
@@ -1192,13 +1199,6 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(":filter ".to_string()));
-            spans.push(Span::styled(
-                "p".to_string(),
-                Style::default()
-                    .fg(theme.status_shortcut_key)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(":progress ".to_string()));
             spans.push(Span::styled(
                 "t".to_string(),
                 Style::default()
@@ -2265,7 +2265,7 @@ mod tests {
         use crate::log_entry::parse_jsonl_line;
 
         let mut app = test_app();
-        app.progress_visible = true;
+
 
         let progress_json = r#"{
             "type": "progress",
@@ -2280,7 +2280,7 @@ mod tests {
         let mut terminal = test_terminal(80, 24);
         terminal
             .draw(|frame| draw(frame, &mut app))
-            .expect("draw should not fail with progress entries visible");
+            .expect("draw should not fail with progress entries in buffer");
     }
 
     #[test]
@@ -2288,7 +2288,7 @@ mod tests {
         use crate::log_entry::parse_jsonl_line;
 
         let mut app = test_app();
-        app.progress_visible = true;
+
 
         let progress_json = r#"{
             "type": "progress",
@@ -2311,7 +2311,7 @@ mod tests {
         use crate::log_entry::parse_jsonl_line;
 
         let mut app = test_app();
-        app.progress_visible = true;
+
 
         // Progress entry with no data field
         let progress_json = r#"{
@@ -2432,21 +2432,6 @@ mod tests {
 
         assert!(desc.len() <= 80);
         assert!(desc.ends_with("..."));
-    }
-
-    // -- Status bar includes p:progress shortcut ------------------------------
-
-    #[test]
-    fn test_status_bar_includes_progress_shortcut() {
-        let app = test_app();
-        let line = build_status_bar_line(&app, 120);
-        let text = line_text(&line);
-
-        assert!(
-            text.contains("p:progress"),
-            "expected p:progress shortcut in: {}",
-            text
-        );
     }
 
     // -- Light theme draw smoke tests -----------------------------------------
