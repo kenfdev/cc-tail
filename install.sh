@@ -17,7 +17,7 @@ esac
 # Detect OS
 OS=$(uname -s)
 case "$OS" in
-  Linux)  TARGET="${ARCH}-unknown-linux-gnu" ;;
+  Linux)  TARGET="${ARCH}-unknown-linux-musl" ;;
   Darwin) TARGET="${ARCH}-apple-darwin" ;;
   *) echo "Unsupported OS: $OS" && exit 1 ;;
 esac

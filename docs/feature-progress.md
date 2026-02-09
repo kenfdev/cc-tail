@@ -265,7 +265,7 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | CI matrix (macOS + Linux, x86_64 + aarch64), release workflow triggers, artifact naming |
-| Implement | `[x]` | `.github/workflows/ci.yml`: 4-target matrix (macos-13, macos-latest, ubuntu-latest, ubuntu-24.04-arm) with fmt, clippy, test, build. `.github/workflows/release.yml`: triggered on `v*` tags, builds release binaries, creates GitHub Release via `softprops/action-gh-release`. `Cargo.toml`: renamed to `cctail`, added repository/readme/keywords/categories metadata. `README.md`: installation (cargo install + binary download), usage, key bindings. `cargo publish --dry-run` succeeds. 648 tests passing, zero clippy warnings. |
+| Implement | `[x]` | `.github/workflows/ci.yml`: 3-target matrix (macos-latest, ubuntu-latest, ubuntu-24.04-arm) with fmt, clippy, test, build. Linux targets use musl (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) for fully static binaries. `.github/workflows/release.yml`: triggered on `v*` tags, builds release binaries with `--target` flag, creates GitHub Release via `softprops/action-gh-release`. `install.sh`: maps Linux to `linux-musl` target. `Cargo.toml`: renamed to `cctail`, added repository/readme/keywords/categories metadata. `README.md`: installation (cargo install + binary download), usage, key bindings. |
 | Review | `[x]` | `cargo fmt --check` passes, `cargo clippy -- -D warnings` passes, `cargo test` (648 tests OK), `cargo publish --dry-run` succeeds. |
 
 ---
