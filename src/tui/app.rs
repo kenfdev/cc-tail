@@ -389,7 +389,7 @@ impl App {
     /// Handle the `t` key: spawn tmux panes for all agents in the active session.
     ///
     /// Checks whether we are inside tmux, whether a session is selected,
-    /// and then delegates to `TmuxManager::spawn_session`.
+    /// and then delegates to `TmuxManager::spawn_panes`.
     fn open_tmux_panes(&mut self) {
         use crate::tmux;
 
@@ -398,15 +398,6 @@ impl App {
             self.status_message = Some("Not inside tmux (start tmux first)".to_string());
             return;
         }
-
-        // Need a project path for session naming.
-        let project_path = match &self.project_path {
-            Some(p) => p.clone(),
-            None => {
-                self.status_message = Some("No project path detected".to_string());
-                return;
-            }
-        };
 
         // Need an active session to know which agents to spawn panes for.
         let session_id = match &self.active_session_id {
@@ -449,10 +440,9 @@ impl App {
             return;
         }
 
-        let prefix = &self.config.tmux.session_prefix;
         match self
             .tmux_manager
-            .spawn_session(prefix, &project_path, &agent_log_paths)
+            .spawn_panes(&agent_log_paths)
         {
             Ok(count) => {
                 self.status_message = Some(format!(
@@ -1622,15 +1612,15 @@ mod tests {
 
         // Should show a status message about an error condition.
         // Due to test parallelism with env vars, we might hit "not inside tmux"
-        // or fall through to "No project path detected" (if another test
+        // or fall through to "Select a session first" (if another test
         // concurrently restores the TMUX var). Both are valid error paths.
         assert!(app.status_message.is_some());
         let msg = app.status_message.as_ref().unwrap();
         assert!(
             msg.contains("tmux")
                 || msg.contains("not inside")
-                || msg.contains("project path")
-                || msg.contains("session"),
+                || msg.contains("session")
+                || msg.contains("Select"),
             "expected error status message, got: {}",
             msg
         );
@@ -1737,31 +1727,9 @@ mod tests {
         assert!(!app.quit_confirm_pending);
     }
 
-    #[test]
-    fn test_t_key_without_project_path_shows_error() {
-        let mut app = App::new(test_config());
-        app.project_path = None;
-
-        // Set TMUX env to simulate being inside tmux.
-        let original = std::env::var("TMUX").ok();
-        std::env::set_var("TMUX", "/tmp/tmux/default,1234,0");
-
-        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-
-        assert!(app.status_message.is_some());
-        let msg = app.status_message.as_ref().unwrap();
-        assert!(
-            msg.contains("project path") || msg.contains("No project"),
-            "expected project path message, got: {}",
-            msg
-        );
-
-        // Restore TMUX env var.
-        match original {
-            Some(val) => std::env::set_var("TMUX", val),
-            None => std::env::remove_var("TMUX"),
-        }
-    }
+    // test_t_key_without_project_path_shows_error removed: the project_path
+    // check no longer exists in open_tmux_panes(). Already covered by
+    // test_t_key_without_active_session_shows_error.
 
     // -- Help overlay tests ---------------------------------------------------
 
@@ -1836,7 +1804,6 @@ mod tests {
     #[test]
     fn test_t_key_without_active_session_shows_error() {
         let mut app = App::new(test_config());
-        app.project_path = Some(PathBuf::from("/fake/project"));
         app.active_session_id = None;
 
         // Set TMUX env to simulate being inside tmux.

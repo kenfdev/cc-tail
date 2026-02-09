@@ -9,3 +9,9 @@
 **Trigger:** REJECTED
 
 **Lesson:** Security review identified unbounded memory allocation in `read_to_string` (no cap on bytes read per call) and unbounded `incomplete_line_buf` growth. When reading from files incrementally, always cap the maximum bytes read per call and limit buffer sizes to prevent OOM from pathological inputs.
+
+## 2026-02-09 - Task #132, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** `build_stream_command()` in `src/tmux.rs` constructs a shell command string via `format!` without quoting the binary path or log file path. Since `tmux split-window` passes this string to `sh -c`, file paths with spaces or shell metacharacters can cause word-splitting or arbitrary command execution. Shell-quote all interpolated values in command strings that will be interpreted by a shell.

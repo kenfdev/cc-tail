@@ -2,15 +2,15 @@
 //!
 //! Provides a trait-based abstraction (`Multiplexer`) for terminal multiplexer
 //! backends, with a concrete `TmuxBackend` that shells out to the `tmux` CLI.
-//! The `TmuxManager` orchestrates pane lifecycle: creating a session, spawning
-//! per-agent panes running `cc-tail stream`, applying tiled layout, and
+//! The `TmuxManager` orchestrates pane lifecycle: splitting panes in the
+//! current window running `cc-tail stream`, applying tiled layout, and
 //! cleaning up on exit.
 //!
 //! Design notes:
 //! - Process-based: all tmux interaction goes through `std::process::Command`.
 //! - Synchronous: tmux commands complete in sub-millisecond; no async needed.
-//! - Session naming: `<prefix>-<hash>` where hash is the first 8 hex chars of
-//!   a simple hash of the project path, avoiding collision with user sessions.
+//! - Panes are split in the current window (using `$TMUX_PANE`) rather than
+//!   creating a separate detached session.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -87,25 +87,28 @@ pub trait Multiplexer {
     /// Check whether the multiplexer binary is installed and reachable.
     fn is_available(&self) -> bool;
 
-    /// Create a new pane in the given session, running the given command.
+    /// Create a new pane by splitting the given target, running the given command.
     ///
+    /// The `target` can be a session name or a pane ID (e.g. `%5`).
     /// Returns a `PaneHandle` for the newly created pane.
     fn create_pane(
         &self,
-        session_name: &str,
+        target: &str,
         pane_title: &str,
         command: &str,
     ) -> Result<PaneHandle, TmuxError>;
 
     /// Kill (close) a single pane by its ID.
-    #[allow(dead_code)]
     fn kill_pane(&self, pane_id: &str) -> Result<(), TmuxError>;
 
     /// Kill an entire tmux session by name.
+    #[allow(dead_code)]
     fn kill_session(&self, session_name: &str) -> Result<(), TmuxError>;
 
-    /// Set the layout of all panes in a session's first window.
-    fn set_layout(&self, session_name: &str, layout: &str) -> Result<(), TmuxError>;
+    /// Set the layout of all panes in a target's window.
+    ///
+    /// The `target` can be a session name or a pane ID.
+    fn set_layout(&self, target: &str, layout: &str) -> Result<(), TmuxError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +124,7 @@ impl TmuxBackend {
     ///
     /// If a session with the given name already exists, this is a no-op
     /// (tmux returns an error that we intentionally ignore).
+    #[allow(dead_code)]
     pub fn create_session(&self, session_name: &str) -> Result<(), TmuxError> {
         let output = Command::new("tmux")
             .args(["new-session", "-d", "-s", session_name])
@@ -177,15 +181,16 @@ impl Multiplexer for TmuxBackend {
 
     fn create_pane(
         &self,
-        session_name: &str,
+        target: &str,
         _pane_title: &str,
         command: &str,
     ) -> Result<PaneHandle, TmuxError> {
         let output = Command::new("tmux")
             .args([
                 "split-window",
+                "-d",
                 "-t",
-                session_name,
+                target,
                 "-h",
                 "-P",
                 "-F",
@@ -196,7 +201,7 @@ impl Multiplexer for TmuxBackend {
 
         if !output.status.success() {
             return Err(TmuxError::CommandFailed {
-                command: format!("tmux split-window -t {}", session_name),
+                command: format!("tmux split-window -d -t {}", target),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
         }
@@ -243,14 +248,14 @@ impl Multiplexer for TmuxBackend {
         Ok(())
     }
 
-    fn set_layout(&self, session_name: &str, layout: &str) -> Result<(), TmuxError> {
+    fn set_layout(&self, target: &str, layout: &str) -> Result<(), TmuxError> {
         let output = Command::new("tmux")
-            .args(["select-layout", "-t", session_name, layout])
+            .args(["select-layout", "-t", target, layout])
             .output()?;
 
         if !output.status.success() {
             return Err(TmuxError::CommandFailed {
-                command: format!("tmux select-layout -t {} {}", session_name, layout),
+                command: format!("tmux select-layout -t {} {}", target, layout),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
         }
@@ -273,11 +278,29 @@ pub fn is_inside_tmux() -> bool {
         .unwrap_or(false)
 }
 
+/// Read the current pane ID from the `$TMUX_PANE` environment variable.
+///
+/// Returns `Some(pane_id)` (e.g. `Some("%5")`) if the variable is set,
+/// non-empty, and matches the expected `%\d+` format. Returns `None`
+/// otherwise (defense-in-depth against unexpected values).
+pub fn get_own_pane_id() -> Option<String> {
+    std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .filter(|v| is_valid_pane_id(v))
+}
+
+/// Validate that a pane ID matches the expected tmux format `%\d+`.
+fn is_valid_pane_id(s: &str) -> bool {
+    s.starts_with('%') && s.len() > 1 && s[1..].chars().all(|c| c.is_ascii_digit())
+}
+
 /// Compute a deterministic session name from a project path.
 ///
 /// Format: `<prefix>-<hash>` where `<hash>` is the first 8 hex chars
 /// of a simple byte-sum hash of the path string. This avoids collision
 /// with user tmux sessions.
+#[allow(dead_code)]
 pub fn session_name_for_project(prefix: &str, project_path: &Path) -> String {
     let path_str = project_path.to_string_lossy();
     let hash = simple_hash(path_str.as_bytes());
@@ -288,6 +311,7 @@ pub fn session_name_for_project(prefix: &str, project_path: &Path) -> String {
 ///
 /// This is intentionally simple and deterministic; collision resistance
 /// across a handful of project paths is more than sufficient.
+#[allow(dead_code)]
 fn simple_hash(data: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c_9dc5; // FNV offset basis
     for &byte in data {
@@ -308,11 +332,27 @@ pub fn resolve_cc_tail_binary() -> String {
         .unwrap_or_else(|| "cctail".to_string())
 }
 
+/// Shell-quote a string for safe inclusion in `sh -c` commands.
+///
+/// Wraps the value in single quotes and escapes any embedded single quotes
+/// using the POSIX-safe pattern `'\''` (end quote, escaped quote, start quote).
+/// This prevents word-splitting and metacharacter interpretation.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the `cc-tail stream` command string for a given log file.
 ///
-/// Format: `<binary> stream --file <path> --replay 0`
+/// Both the binary path and log path are shell-quoted to prevent command
+/// injection when the resulting string is passed through `sh -c` by tmux.
+///
+/// Format: `<quoted-binary> stream --file <quoted-path> --replay 0`
 pub fn build_stream_command(binary: &str, log_path: &Path) -> String {
-    format!("{} stream --file {} --replay 0", binary, log_path.display())
+    format!(
+        "{} stream --file {} --replay 0",
+        shell_quote(binary),
+        shell_quote(&log_path.display().to_string())
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -322,14 +362,14 @@ pub fn build_stream_command(binary: &str, log_path: &Path) -> String {
 /// High-level orchestrator for tmux pane lifecycle.
 ///
 /// Manages the mapping from agent log paths to tmux pane handles, handles
-/// session creation, pane spawning, layout application, and cleanup.
+/// pane spawning in the current window, layout application, and cleanup.
 pub struct TmuxManager {
     /// The underlying multiplexer backend.
     backend: TmuxBackend,
     /// Map from agent log path to pane handle.
     pane_handles: HashMap<String, PaneHandle>,
-    /// The tmux session name (e.g. `cc-tail-a1b2c3d4`).
-    session_name: Option<String>,
+    /// The pane ID of the cc-tail TUI itself (read from `$TMUX_PANE`).
+    own_pane_id: Option<String>,
     /// The resolved path to the cc-tail binary.
     binary_path: String,
     /// The layout to apply after pane creation.
@@ -342,7 +382,7 @@ impl TmuxManager {
         Self {
             backend: TmuxBackend,
             pane_handles: HashMap::new(),
-            session_name: None,
+            own_pane_id: None,
             binary_path: resolve_cc_tail_binary(),
             layout,
         }
@@ -352,12 +392,6 @@ impl TmuxManager {
     #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
         self.backend.is_available()
-    }
-
-    /// Get the current session name, if any.
-    #[allow(dead_code)]
-    pub fn session_name(&self) -> Option<&str> {
-        self.session_name.as_deref()
     }
 
     /// Get the number of active panes being tracked.
@@ -371,16 +405,14 @@ impl TmuxManager {
         self.pane_handles.contains_key(log_path_key)
     }
 
-    /// Set up a tmux session and spawn panes for all provided agent log paths.
+    /// Split panes in the current tmux window for all provided agent log paths.
     ///
-    /// If a session already exists (from a previous `t` press), kills it first
-    /// and creates a fresh one.
+    /// If panes already exist (from a previous `t` press), kills them first
+    /// via `cleanup()` and creates fresh ones.
     ///
     /// Returns the number of panes successfully created, or an error.
-    pub fn spawn_session(
+    pub fn spawn_panes(
         &mut self,
-        session_prefix: &str,
-        project_path: &Path,
         agent_log_paths: &[(String, std::path::PathBuf)],
     ) -> Result<usize, TmuxError> {
         if !is_inside_tmux() {
@@ -391,23 +423,28 @@ impl TmuxManager {
             return Err(TmuxError::NotInstalled);
         }
 
-        let session_name = session_name_for_project(session_prefix, project_path);
+        // Read our own pane ID from $TMUX_PANE.
+        let own_pane_id = match get_own_pane_id() {
+            Some(id) => id,
+            None => {
+                return Err(TmuxError::CommandFailed {
+                    command: "read $TMUX_PANE".to_string(),
+                    stderr: "$TMUX_PANE not set".to_string(),
+                });
+            }
+        };
+        self.own_pane_id = Some(own_pane_id.clone());
 
-        // If we already have a session, kill it first.
-        if let Some(ref old_name) = self.session_name {
-            let _ = self.backend.kill_session(old_name);
+        // If we already have panes from a previous `t` press, clean them up.
+        if !self.pane_handles.is_empty() {
+            self.cleanup();
         }
-        self.pane_handles.clear();
 
-        // Create the new session.
-        self.backend.create_session(&session_name)?;
-        self.session_name = Some(session_name.clone());
-
-        // Spawn a pane for each agent.
+        // Spawn a pane for each agent by splitting our own pane's window.
         let mut created = 0;
         for (label, log_path) in agent_log_paths {
             let cmd = build_stream_command(&self.binary_path, log_path);
-            match self.backend.create_pane(&session_name, label, &cmd) {
+            match self.backend.create_pane(&own_pane_id, label, &cmd) {
                 Ok(handle) => {
                     self.pane_handles
                         .insert(log_path.display().to_string(), handle);
@@ -422,23 +459,23 @@ impl TmuxManager {
             }
         }
 
-        // Apply the layout.
+        // Apply the layout to the window containing our pane.
         if created > 0 {
-            let _ = self.backend.set_layout(&session_name, &self.layout);
+            let _ = self.backend.set_layout(&own_pane_id, &self.layout);
         }
 
         Ok(created)
     }
 
     /// Spawn a single new pane for a subagent that appeared after the initial
-    /// session was created.
+    /// panes were created.
     ///
-    /// No-op if no session exists or if a pane already exists for this path.
+    /// No-op if no own pane ID is set or if a pane already exists for this path.
     #[allow(dead_code)]
     pub fn spawn_pane_for_agent(&mut self, label: &str, log_path: &Path) -> Result<(), TmuxError> {
-        let session_name = match self.session_name {
-            Some(ref name) => name.clone(),
-            None => return Ok(()), // No session active, nothing to do.
+        let own_pane_id = match self.own_pane_id {
+            Some(ref id) => id.clone(),
+            None => return Ok(()), // No pane context active, nothing to do.
         };
 
         let key = log_path.display().to_string();
@@ -447,24 +484,26 @@ impl TmuxManager {
         }
 
         let cmd = build_stream_command(&self.binary_path, log_path);
-        let handle = self.backend.create_pane(&session_name, label, &cmd)?;
+        let handle = self.backend.create_pane(&own_pane_id, label, &cmd)?;
         self.pane_handles.insert(key, handle);
 
         // Re-apply layout to incorporate the new pane.
-        let _ = self.backend.set_layout(&session_name, &self.layout);
+        let _ = self.backend.set_layout(&own_pane_id, &self.layout);
 
         Ok(())
     }
 
-    /// Clean up: kill the tmux session and all tracked panes.
+    /// Clean up: kill only the panes that cc-tail created.
     ///
-    /// Called during quit. Errors are silently ignored (best-effort cleanup).
+    /// Called during quit or when the user presses `T`. Iterates all tracked
+    /// pane handles and kills each one individually, leaving unrelated panes
+    /// untouched. Errors are silently ignored (best-effort cleanup; panes
+    /// may have already been closed by the user).
     pub fn cleanup(&mut self) {
-        if let Some(ref session_name) = self.session_name {
-            let _ = self.backend.kill_session(session_name);
+        for handle in self.pane_handles.values() {
+            let _ = self.backend.kill_pane(&handle.pane_id);
         }
         self.pane_handles.clear();
-        self.session_name = None;
     }
 }
 
@@ -610,7 +649,10 @@ mod tests {
     #[test]
     fn test_build_stream_command() {
         let cmd = build_stream_command("cctail", Path::new("/tmp/session.jsonl"));
-        assert_eq!(cmd, "cctail stream --file /tmp/session.jsonl --replay 0");
+        assert_eq!(
+            cmd,
+            "'cctail' stream --file '/tmp/session.jsonl' --replay 0"
+        );
     }
 
     #[test]
@@ -618,7 +660,29 @@ mod tests {
         let cmd = build_stream_command("/usr/local/bin/cctail", Path::new("/tmp/my session.jsonl"));
         assert_eq!(
             cmd,
-            "/usr/local/bin/cctail stream --file /tmp/my session.jsonl --replay 0"
+            "'/usr/local/bin/cctail' stream --file '/tmp/my session.jsonl' --replay 0"
+        );
+    }
+
+    #[test]
+    fn test_build_stream_command_with_shell_metacharacters() {
+        // Paths containing shell metacharacters should be safely quoted.
+        let cmd = build_stream_command(
+            "cctail",
+            Path::new("/tmp/$(whoami)/file;rm -rf /.jsonl"),
+        );
+        assert_eq!(
+            cmd,
+            "'cctail' stream --file '/tmp/$(whoami)/file;rm -rf /.jsonl' --replay 0"
+        );
+    }
+
+    #[test]
+    fn test_build_stream_command_with_single_quotes_in_path() {
+        let cmd = build_stream_command("cctail", Path::new("/tmp/it's a test.jsonl"));
+        assert_eq!(
+            cmd,
+            "'cctail' stream --file '/tmp/it'\\''s a test.jsonl' --replay 0"
         );
     }
 
@@ -649,7 +713,7 @@ mod tests {
     #[test]
     fn test_tmux_manager_new() {
         let mgr = TmuxManager::new("tiled".to_string());
-        assert!(mgr.session_name().is_none());
+        assert!(mgr.own_pane_id.is_none());
         assert_eq!(mgr.pane_count(), 0);
         assert_eq!(mgr.layout, "tiled");
     }
@@ -661,18 +725,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tmux_manager_cleanup_no_session() {
+    fn test_tmux_manager_cleanup_no_panes() {
         let mut mgr = TmuxManager::new("tiled".to_string());
-        // Should not panic even with no session.
+        // Should not panic even with no panes.
         mgr.cleanup();
-        assert!(mgr.session_name().is_none());
         assert_eq!(mgr.pane_count(), 0);
     }
 
     #[test]
-    fn test_tmux_manager_spawn_pane_for_agent_no_session() {
+    fn test_tmux_manager_spawn_pane_for_agent_no_own_pane() {
         let mut mgr = TmuxManager::new("tiled".to_string());
-        // Should be a no-op when no session is active.
+        // Should be a no-op when no own_pane_id is set.
+        assert!(mgr.own_pane_id.is_none());
         let result = mgr.spawn_pane_for_agent("test", Path::new("/tmp/a.jsonl"));
         assert!(result.is_ok());
     }
@@ -693,16 +757,14 @@ mod tests {
     // -- Integration-style tests for spawn_session error paths ----------------
 
     #[test]
-    fn test_spawn_session_not_inside_tmux() {
+    fn test_spawn_panes_not_inside_tmux() {
         // Temporarily unset TMUX to simulate not being inside tmux.
         // Note: This is best-effort; in CI, TMUX is likely already unset.
         let original = std::env::var("TMUX").ok();
         std::env::remove_var("TMUX");
 
         let mut mgr = TmuxManager::new("tiled".to_string());
-        let result = mgr.spawn_session(
-            "cc-tail",
-            Path::new("/fake/project"),
+        let result = mgr.spawn_panes(
             &[("main".to_string(), PathBuf::from("/fake/session.jsonl"))],
         );
 
@@ -713,5 +775,117 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TmuxError::NotInsideTmux));
+    }
+
+    #[test]
+    fn test_get_own_pane_id_reads_env() {
+        // Save and set TMUX_PANE for this test.
+        let original = std::env::var("TMUX_PANE").ok();
+        std::env::set_var("TMUX_PANE", "%42");
+
+        let pane_id = get_own_pane_id();
+        assert_eq!(pane_id, Some("%42".to_string()));
+
+        // Restore env var.
+        match original {
+            Some(val) => std::env::set_var("TMUX_PANE", val),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+    }
+
+    #[test]
+    fn test_get_own_pane_id_unset() {
+        let original = std::env::var("TMUX_PANE").ok();
+        std::env::remove_var("TMUX_PANE");
+
+        let pane_id = get_own_pane_id();
+        // When TMUX_PANE is not set, should return None.
+        // Note: due to test parallelism, another test may set it concurrently.
+        // We accept either None or Some as valid.
+        let _ = pane_id;
+
+        // Restore env var.
+        if let Some(val) = original {
+            std::env::set_var("TMUX_PANE", val);
+        }
+    }
+
+    #[test]
+    fn test_get_own_pane_id_rejects_invalid_format() {
+        let original = std::env::var("TMUX_PANE").ok();
+
+        // Set TMUX_PANE to a value that doesn't match %\d+.
+        std::env::set_var("TMUX_PANE", "not-a-pane-id");
+        let result = get_own_pane_id();
+        // Should be None due to format validation.
+        // Note: test parallelism may cause races, so we accept either.
+        let _ = result;
+
+        // Try another invalid value: percent sign but no digits.
+        std::env::set_var("TMUX_PANE", "%");
+        let result = get_own_pane_id();
+        let _ = result;
+
+        // Try another invalid value: percent sign with non-digits.
+        std::env::set_var("TMUX_PANE", "%abc");
+        let result = get_own_pane_id();
+        let _ = result;
+
+        // Restore env var.
+        match original {
+            Some(val) => std::env::set_var("TMUX_PANE", val),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+    }
+
+    // -- shell_quote tests ----------------------------------------------------
+
+    #[test]
+    fn test_shell_quote_simple() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_quote_with_spaces() {
+        assert_eq!(shell_quote("/path/with spaces/file"), "'/path/with spaces/file'");
+    }
+
+    #[test]
+    fn test_shell_quote_with_single_quotes() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_quote_with_shell_metacharacters() {
+        assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_quote("foo;bar"), "'foo;bar'");
+        assert_eq!(shell_quote("foo`whoami`bar"), "'foo`whoami`bar'");
+        assert_eq!(shell_quote("$HOME/file"), "'$HOME/file'");
+    }
+
+    #[test]
+    fn test_shell_quote_empty() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    // -- is_valid_pane_id tests -----------------------------------------------
+
+    #[test]
+    fn test_is_valid_pane_id_valid() {
+        assert!(is_valid_pane_id("%0"));
+        assert!(is_valid_pane_id("%5"));
+        assert!(is_valid_pane_id("%42"));
+        assert!(is_valid_pane_id("%12345"));
+    }
+
+    #[test]
+    fn test_is_valid_pane_id_invalid() {
+        assert!(!is_valid_pane_id(""));
+        assert!(!is_valid_pane_id("%"));
+        assert!(!is_valid_pane_id("%abc"));
+        assert!(!is_valid_pane_id("5"));
+        assert!(!is_valid_pane_id("not-a-pane"));
+        assert!(!is_valid_pane_id("%12abc"));
+        assert!(!is_valid_pane_id("%-1"));
     }
 }

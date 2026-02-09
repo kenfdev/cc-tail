@@ -217,8 +217,8 @@ Spawn per-agent tmux panes running `cc-tail stream`, manage pane lifecycle, and 
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | `Multiplexer` trait design, `TmuxBackend` implementation, pane lifecycle on session switch, cleanup strategy |
-| Implement | `[x]` | `tmux.rs`. `TmuxManager` struct. `Multiplexer` trait for backends. `TmuxBackend` with pane spawning. `$TMUX` env detection. Session naming with hash (`cc-tail-<project-hash>`). Layout application (tiled). Pane lifecycle management. Error handling (NotInstalled, NotInsideTmux). Track pane IDs for cleanup. Non-tmux: show info message. `T` key closes all tmux panes via `close_tmux_panes()` without quitting TUI. |
-| Review | `[x]` | Manual testing: pane creation, layout, new subagent pane, session switch behavior, cleanup on exit. |
+| Implement | `[x]` | `tmux.rs`. `TmuxManager` struct. `Multiplexer` trait for backends. `TmuxBackend` with pane spawning. `$TMUX` and `$TMUX_PANE` env detection. Panes split in current window via `split-window -d -t $TMUX_PANE` (no separate session). Layout application (tiled). Per-pane cleanup via `kill_pane` (only cc-tail's panes, not unrelated ones). Error handling (NotInstalled, NotInsideTmux, $TMUX_PANE not set). Track pane IDs for cleanup. Non-tmux: show info message. `T` key closes only cc-tail-created panes via `close_tmux_panes()` without quitting TUI. Security: `shell_quote()` for safe command construction, `is_valid_pane_id()` format validation on `$TMUX_PANE`. |
+| Review | `[x]` | Manual testing: pane creation, layout, new subagent pane, session switch behavior, cleanup on exit. Security review: shell injection in `build_stream_command` fixed via `shell_quote()`, `get_own_pane_id()` validates `%\d+` format. 664 tests pass, zero clippy warnings. |
 
 ---
 
