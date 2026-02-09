@@ -9,7 +9,6 @@ mod ring_buffer;
 mod session;
 mod stream;
 mod theme;
-mod tmux;
 mod tool_summary;
 mod tui;
 mod watcher;

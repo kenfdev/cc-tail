@@ -16,7 +16,6 @@ struct FileConfig {
     verbose: Option<bool>,
     theme: Option<String>,
     display: FileDisplayConfig,
-    tmux: FileTmuxConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -24,13 +23,6 @@ struct FileConfig {
 struct FileDisplayConfig {
     timestamps: Option<bool>,
     timestamp_format: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct FileTmuxConfig {
-    session_prefix: Option<String>,
-    layout: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -44,19 +36,12 @@ pub struct AppConfig {
     pub verbose: bool,
     pub theme: Theme,
     pub display: DisplayConfig,
-    pub tmux: TmuxConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplayConfig {
     pub timestamps: bool,
     pub timestamp_format: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TmuxConfig {
-    pub session_prefix: String,
-    pub layout: String,
 }
 
 impl Default for AppConfig {
@@ -67,7 +52,6 @@ impl Default for AppConfig {
             verbose: false,
             theme: Theme::Dark,
             display: DisplayConfig::default(),
-            tmux: TmuxConfig::default(),
         }
     }
 }
@@ -77,15 +61,6 @@ impl Default for DisplayConfig {
         Self {
             timestamps: true,
             timestamp_format: "%H:%M:%S".to_string(),
-        }
-    }
-}
-
-impl Default for TmuxConfig {
-    fn default() -> Self {
-        Self {
-            session_prefix: "cc-tail".to_string(),
-            layout: "tiled".to_string(),
         }
     }
 }
@@ -177,12 +152,6 @@ pub fn build_config(cli: &Cli) -> AppConfig {
             if let Some(ref fmt) = file_cfg.display.timestamp_format {
                 config.display.timestamp_format = fmt.clone();
             }
-            if let Some(ref prefix) = file_cfg.tmux.session_prefix {
-                config.tmux.session_prefix = prefix.clone();
-            }
-            if let Some(ref layout) = file_cfg.tmux.layout {
-                config.tmux.layout = layout.clone();
-            }
         } else if cli.config.is_some() {
             // User explicitly specified --config but file could not be loaded.
             // The warning was already printed by load_file_config if the file
@@ -259,8 +228,6 @@ mod tests {
         assert_eq!(config.theme, Theme::Dark);
         assert!(config.display.timestamps);
         assert_eq!(config.display.timestamp_format, "%H:%M:%S");
-        assert_eq!(config.tmux.session_prefix, "cc-tail");
-        assert_eq!(config.tmux.layout, "tiled");
     }
 
     // -- TOML parsing tests ---------------------------------------------------
@@ -274,10 +241,6 @@ theme = "light"
 [display]
 timestamps = false
 timestamp_format = "%Y-%m-%d %H:%M:%S"
-
-[tmux]
-session_prefix = "my-prefix"
-layout = "even-horizontal"
 "#;
         let cfg = parse_file_config(toml).unwrap();
         assert_eq!(cfg.verbose, Some(true));
@@ -287,8 +250,6 @@ layout = "even-horizontal"
             cfg.display.timestamp_format.as_deref(),
             Some("%Y-%m-%d %H:%M:%S")
         );
-        assert_eq!(cfg.tmux.session_prefix.as_deref(), Some("my-prefix"));
-        assert_eq!(cfg.tmux.layout.as_deref(), Some("even-horizontal"));
     }
 
     #[test]
@@ -298,8 +259,6 @@ layout = "even-horizontal"
         assert_eq!(cfg.theme, None);
         assert_eq!(cfg.display.timestamps, None);
         assert_eq!(cfg.display.timestamp_format, None);
-        assert_eq!(cfg.tmux.session_prefix, None);
-        assert_eq!(cfg.tmux.layout, None);
     }
 
     #[test]
@@ -315,8 +274,6 @@ timestamps = false
         assert_eq!(cfg.theme, None);
         assert_eq!(cfg.display.timestamps, Some(false));
         assert_eq!(cfg.display.timestamp_format, None);
-        assert_eq!(cfg.tmux.session_prefix, None);
-        assert_eq!(cfg.tmux.layout, None);
     }
 
     #[test]
@@ -413,10 +370,6 @@ theme = "light"
 [display]
 timestamps = false
 timestamp_format = "%H:%M"
-
-[tmux]
-session_prefix = "custom"
-layout = "even-vertical"
 "#;
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(toml.as_bytes()).unwrap();
@@ -431,8 +384,6 @@ layout = "even-vertical"
         assert_eq!(config.theme, Theme::Light);
         assert!(!config.display.timestamps);
         assert_eq!(config.display.timestamp_format, "%H:%M");
-        assert_eq!(config.tmux.session_prefix, "custom");
-        assert_eq!(config.tmux.layout, "even-vertical");
     }
 
     #[test]
@@ -500,8 +451,6 @@ theme = "light"
         assert_eq!(config.theme, Theme::Light); // from file
         assert!(config.display.timestamps); // default
         assert_eq!(config.display.timestamp_format, "%H:%M:%S"); // default
-        assert_eq!(config.tmux.session_prefix, "cc-tail"); // default
-        assert_eq!(config.tmux.layout, "tiled"); // default
     }
 
     #[test]

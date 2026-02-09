@@ -71,11 +71,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help_overlay_visible {
         draw_help_overlay(frame, app, size);
     }
-
-    // Draw quit confirmation overlay when pending.
-    if app.quit_confirm_pending {
-        draw_quit_confirmation(frame, size);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -846,7 +841,6 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ("Tab", "Toggle focus between panels"),
         ("b", "Toggle sidebar"),
         ("/", "Open filter overlay"),
-        ("t", "Open tmux panes"),
         ("j / Down", "Navigate / scroll (focus-dependent)"),
         ("k / Up", "Navigate / scroll (focus-dependent)"),
         ("Enter", "Confirm session selection"),
@@ -854,7 +848,6 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ("PgUp / PgDn", "Page scroll (log stream)"),
         ("g / Home", "Scroll to top (log stream)"),
         ("G / End / Esc", "Exit scroll mode"),
-        ("T", "Close tmux panes"),
     ];
 
     // Compute overlay dimensions.
@@ -942,9 +935,9 @@ const SEPARATOR_WIDTH: usize = 3;
 
 /// Build the keyboard shortcuts segment text.
 ///
-/// Returns the full shortcuts string like `" q:quit Tab:focus b:sidebar /:filter t:tmux ?:help"`.
+/// Returns the full shortcuts string like `" q:quit Tab:focus b:sidebar /:filter ?:help"`.
 fn shortcuts_text() -> String {
-    " q:quit Tab:focus b:sidebar /:filter t:tmux ?:help".to_string()
+    " q:quit Tab:focus b:sidebar /:filter ?:help".to_string()
 }
 
 /// Build the session info segment text.
@@ -1031,33 +1024,6 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
             ));
             used += badge_width;
-        }
-    }
-
-    // -- Priority 1.5: tmux pane count --
-    let tmux_pane_count = app.tmux_manager.pane_count();
-    if tmux_pane_count > 0 {
-        let tmux_text = format!("tmux:{}", tmux_pane_count);
-        let tw = tmux_text.len();
-        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 };
-        if used + sep_cost + tw <= width {
-            if used > 0 {
-                spans.push(Span::styled(
-                    SEPARATOR.to_string(),
-                    Style::default().fg(theme.status_separator),
-                ));
-                used += SEPARATOR_WIDTH;
-            } else {
-                spans.push(Span::raw(" ".to_string()));
-                used += 1;
-            }
-            spans.push(Span::styled(
-                tmux_text,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            used += tw;
         }
     }
 
@@ -1200,13 +1166,6 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
             ));
             spans.push(Span::raw(":filter ".to_string()));
             spans.push(Span::styled(
-                "t".to_string(),
-                Style::default()
-                    .fg(theme.status_shortcut_key)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(":tmux ".to_string()));
-            spans.push(Span::styled(
                 "?".to_string(),
                 Style::default()
                     .fg(theme.status_shortcut_key)
@@ -1217,58 +1176,6 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
     }
 
     Line::from(spans)
-}
-
-/// Draw the quit confirmation overlay when tmux panes are active.
-///
-/// Shows a centered dialog asking the user to confirm quitting,
-/// which will also kill all tmux panes.
-fn draw_quit_confirmation(frame: &mut Frame, area: Rect) {
-    let overlay_width = area.width.clamp(10, 50);
-    let overlay_height = area.height.clamp(3, 7);
-
-    let x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
-    let overlay_area = Rect::new(x, y, overlay_width, overlay_height);
-
-    frame.render_widget(Clear, overlay_area);
-
-    let block = Block::default()
-        .title(" Quit? ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
-
-    let inner = block.inner(overlay_area);
-    frame.render_widget(block, overlay_area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let lines = vec![
-        Line::from("Kill tmux panes and quit?"),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "y",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":yes  "),
-            Span::styled(
-                "n",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(":no"),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().bg(Color::Black).fg(Color::White))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(paragraph, inner);
 }
 
 /// Draw the status bar at the bottom of the screen.
@@ -2481,12 +2388,12 @@ mod tests {
             .expect("draw should not fail with light theme and sessions");
     }
 
-    // -- tmux integration smoke tests -----------------------------------------
+    // -- status message smoke tests -----------------------------------------
 
     #[test]
     fn test_draw_with_status_message_no_panic() {
         let mut app = test_app();
-        app.status_message = Some("tmux: spawned 3 panes".to_string());
+        app.status_message = Some("some status message".to_string());
 
         let mut terminal = test_terminal(80, 24);
         terminal
@@ -2495,33 +2402,11 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_with_quit_confirmation_no_panic() {
-        let mut app = test_app();
-        app.quit_confirm_pending = true;
-
-        let mut terminal = test_terminal(80, 24);
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw should not fail with quit confirmation");
-    }
-
-    #[test]
-    fn test_draw_quit_confirmation_small_terminal_no_panic() {
-        let mut app = test_app();
-        app.quit_confirm_pending = true;
-
-        let mut terminal = test_terminal(15, 5);
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("draw should not fail with quit confirmation on small terminal");
-    }
-
-    #[test]
     fn test_draw_with_status_message_and_filters_no_panic() {
         use crate::tui::app::ActiveFilters;
 
         let mut app = test_app();
-        app.status_message = Some("Not inside tmux".to_string());
+        app.status_message = Some("some status".to_string());
         app.active_filters = ActiveFilters {
             pattern: Some("error".to_string()),
             level: None,
@@ -2531,19 +2416,6 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &mut app))
             .expect("draw should not fail with status message and filters");
-    }
-
-    #[test]
-    fn test_status_bar_includes_tmux_shortcut() {
-        let app = test_app();
-        let line = build_status_bar_line(&app, 130);
-        let text = line_text(&line);
-
-        assert!(
-            text.contains("t:tmux"),
-            "expected t:tmux shortcut in: {}",
-            text
-        );
     }
 
     #[test]

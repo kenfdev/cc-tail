@@ -44,8 +44,6 @@ cctail stream --file <path/to/session.jsonl>
 | `Tab` | Toggle focus |
 | `/` | Open filter overlay |
 | `b` | Toggle sidebar |
-| `p` | Toggle progress entries |
-| `t` | Spawn tmux panes |
 | `?` | Help |
 | `q` | Quit |
 

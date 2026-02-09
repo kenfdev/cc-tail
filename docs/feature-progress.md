@@ -145,7 +145,7 @@ Implement the dynamic priority status bar showing active filters, inactive badge
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | Priority layout algorithm, badge styling, filter display format |
-| Implement | `[x]` | `tui/ui.rs`. `draw_status_bar()` displays project name, session count, filter status, active session, tmux status. Dynamic key hints (q:quit, /:filter, etc.). Priority layout for narrow terminals. |
+| Implement | `[x]` | `tui/ui.rs`. `draw_status_bar()` displays project name, session count, filter status, active session. Dynamic key hints (q:quit, /:filter, etc.). Priority layout for narrow terminals. |
 | Review | `[x]` | Manual testing: narrow terminal behavior, filter display, inactive badge appearance/disappearance. |
 
 ---
@@ -210,21 +210,21 @@ Implement the lightweight non-TUI streaming mode that tails a single JSONL file 
 
 ---
 
-## 18. tmux Integration
+## 18. tmux Integration (REMOVED)
 
-Spawn per-agent tmux panes running `cc-tail stream`, manage pane lifecycle, and handle cleanup.
+The tmux pane-splitting feature has been removed. Subagent output is viewed inline in the log stream only.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Plan | `[x]` | `Multiplexer` trait design, `TmuxBackend` implementation, pane lifecycle on session switch, cleanup strategy |
-| Implement | `[x]` | `tmux.rs`. `TmuxManager` struct. `Multiplexer` trait for backends. `TmuxBackend` with pane spawning. `$TMUX` and `$TMUX_PANE` env detection. Panes split in current window via `split-window -d -t $TMUX_PANE` (no separate session). Layout application (tiled). Per-pane cleanup via `kill_pane` (only cc-tail's panes, not unrelated ones). Error handling (NotInstalled, NotInsideTmux, $TMUX_PANE not set). Track pane IDs for cleanup. Non-tmux: show info message. `T` key closes only cc-tail-created panes via `close_tmux_panes()` without quitting TUI. Security: `shell_quote()` for safe command construction, `is_valid_pane_id()` format validation on `$TMUX_PANE`. |
-| Review | `[x]` | Manual testing: pane creation, layout, new subagent pane, session switch behavior, cleanup on exit. Security review: shell injection in `build_stream_command` fixed via `shell_quote()`, `get_own_pane_id()` validates `%\d+` format. 664 tests pass, zero clippy warnings. |
+| Plan | `[x]` | Feature removed |
+| Implement | `[x]` | **REMOVED**: `tmux.rs` deleted, all tmux references removed from config, app, ui, and docs. |
+| Review | `[x]` | Feature removed; all references cleaned. |
 
 ---
 
 ## 19. Signal Handling & Graceful Shutdown
 
-Handle SIGINT/SIGTERM for clean terminal restoration and tmux pane cleanup.
+Handle SIGINT/SIGTERM for clean terminal restoration.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -241,7 +241,7 @@ Show a static keyboard shortcut reference on `?` key press.
 | Phase | Status | Notes |
 |-------|--------|-------|
 | Plan | `[x]` | Overlay layout, shortcut list content |
-| Implement | `[x]` | `tui/app.rs` + `tui/ui.rs`. `help_overlay_visible` flag in App. `draw_help_overlay()` renders keybindings modal. `?` key handler toggles. Displays 20+ keybindings including `u/d` (half-page scroll) and `T` (close tmux panes). Clear widget for modal overlay. Any key dismisses. |
+| Implement | `[x]` | `tui/app.rs` + `tui/ui.rs`. `help_overlay_visible` flag in App. `draw_help_overlay()` renders keybindings modal. `?` key handler toggles. Displays keybindings including `u/d` (half-page scroll). Clear widget for modal overlay. Any key dismisses. |
 | Review | `[x]` | Manual testing: overlay appearance, dismissal, terminal size edge cases. |
 
 ---
@@ -291,7 +291,7 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 | 15 | Progress Entry Toggle (REMOVED) | `[x]` | `[x]` | `[x]` |
 | 16 | Theme Support | `[x]` | `[x]` | `[x]` |
 | 17 | `stream` Subcommand | `[x]` | `[x]` | `[x]` |
-| 18 | tmux Integration | `[x]` | `[x]` | `[x]` |
+| 18 | tmux Integration (REMOVED) | `[x]` | `[x]` | `[x]` |
 | 19 | Signal Handling & Graceful Shutdown | `[x]` | `[x]` | `[x]` |
 | 20 | Help Overlay | `[x]` | `[x]` | `[x]` |
 | 21 | Log Stream Scroll Mode | `[x]` | `[x]` | `[x]` |

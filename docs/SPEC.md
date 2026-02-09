@@ -8,7 +8,7 @@ When running Claude Code in non-interactive mode (e.g. via shell scripts in a ra
 
 ## Solution
 
-A Rust TUI application (built on `ratatui`) that watches Claude Code's JSONL log directory, detects active sessions, parses log entries, and renders them as a rich, color-formatted chat-like stream. Features a sidebar for session/agent browsing, runtime-changeable filters, and optional tmux integration for splitting subagent output into separate panes.
+A Rust TUI application (built on `ratatui`) that watches Claude Code's JSONL log directory, detects active sessions, parses log entries, and renders them as a rich, color-formatted chat-like stream. Features a sidebar for session/agent browsing and runtime-changeable filters.
 
 ---
 
@@ -17,7 +17,7 @@ A Rust TUI application (built on `ratatui`) that watches Claude Code's JSONL log
 - **Session** = one Claude Code conversation = main agent + its subagents (they share a `sessionId`)
 - **cc-tail shows one session at a time** — multiple concurrent sessions are not shown simultaneously
 - **Session switching** happens via the sidebar — users browse and select which session to monitor
-- **Subagents within a session** can be viewed inline (interleaved) or split into tmux panes
+- **Subagents within a session** are viewed inline (interleaved)
 
 ---
 
@@ -80,10 +80,7 @@ Launches the TUI and begins monitoring Claude Code sessions.
 
 ### `stream` Subcommand
 
-A lightweight, non-TUI streaming mode that tails a single JSONL file and outputs formatted log lines to stdout. Designed for two purposes:
-
-1. **tmux pane backend**: The TUI spawns `cc-tail stream` instances in tmux panes, one per agent
-2. **Standalone use**: Users can invoke directly for custom workflows, scripting, or piping
+A lightweight, non-TUI streaming mode that tails a single JSONL file and outputs formatted log lines to stdout. Designed for standalone use: users can invoke directly for custom workflows, scripting, or piping.
 
 ```
 cc-tail stream --file <path> [OPTIONS]
@@ -130,7 +127,7 @@ cc-tail stream --file <path> [OPTIONS]
 │                  │   The auth module is organized as follows...      │
 │                  │                                                   │
 ├──────────────────┴──────────────────────────────────────────────────-┤
-│ j/k:navigate  Enter:select  Tab:focus  /:filter  t:tmux  ?:help     │
+│ j/k:navigate  Enter:select  Tab:focus  /:filter  ?:help              │
 └─────────────────────────────────────────────────────────────────────-┘
 ```
 
@@ -268,7 +265,7 @@ cc-tail uses a **channel-based architecture** to bridge the async file-watching 
 
 ### Self-Debugging
 
-In `--verbose` mode, cc-tail writes debug information to **stderr**. Since ratatui uses stdout for rendering, stderr remains available for diagnostics. Users redirect with `cc-tail --verbose 2>debug.log` to capture watcher events, parse failures, tmux command output, and session detection logic.
+In `--verbose` mode, cc-tail writes debug information to **stderr**. Since ratatui uses stdout for rendering, stderr remains available for diagnostics. Users redirect with `cc-tail --verbose 2>debug.log` to capture watcher events, parse failures, and session detection logic.
 
 ---
 
@@ -294,58 +291,6 @@ Entries beyond the 50MB byte budget are evicted oldest-first. For typical sessio
 
 ---
 
-## tmux Integration
-
-### Concept
-
-When running inside a tmux session, cc-tail can spawn separate tmux panes for each agent (main + subagents). This provides a multi-pane view where each agent's output is isolated in its own pane.
-
-### Triggering
-
-- Press `t` in the TUI to spawn tmux panes for the current session's agents
-- Auto-detection: cc-tail checks `$TMUX` environment variable to know if it's inside tmux
-- If not inside tmux, the `t` key shows an informational message: "tmux panes require running inside a tmux session"
-
-### Pane Management
-
-- cc-tail creates a **dedicated tmux session** named `cc-tail-<project-hash>` (short hash of project path) to avoid collisions with user's tmux sessions
-- One pane per agent: `main`, `effervescent-soaring-cook`, etc.
-- Each pane runs `cc-tail stream --file <agent-jsonl-path> --replay 0` — zero replay since the TUI already provides historical context
-- Panes auto-tile using `tmux select-layout tiled`
-- **No pane count limit** — if a session has 8 subagents, 9 panes are created. Trust the user's terminal size.
-- **TUI becomes controller**: the TUI stays as the main pane (with sidebar and status bar) alongside the spawned agent panes
-- When new subagents spawn (detected via new files in `{sessionId}/subagents/`), a new pane is automatically created running `cc-tail stream` for that subagent's log file
-- Panes remain until cc-tail exits — no auto-close, no timeout
-
-### Pane Lifecycle on Session Switch
-
-When the user switches sessions in the TUI sidebar, **existing tmux panes are kept running**. They continue tailing the old session's agent files. Panes are only killed and respawned when the user presses `t` again for the new session — this explicitly replaces the pane set.
-
-### Pane Cleanup
-
-- **SIGINT (Ctrl+C)**: graceful shutdown — parent cc-tail tracks all spawned pane IDs and runs `tmux kill-pane` for each, removes the cc-tail tmux session, exits cleanly. Streamer processes are passive — they don't monitor the parent.
-- **SIGTERM**: same cleanup as SIGINT
-- **SIGKILL**: cannot be caught (OS limitation) — orphaned panes remain. User cleans up manually with `tmux kill-session -t cc-tail-<hash>`
-
-### TmuxBackend
-
-Implements pane management via `tmux` CLI commands:
-
-```rust
-trait Multiplexer: Send + Sync {
-    fn create_session(&self, name: &str) -> Result<SessionHandle>;
-    fn create_pane(&self, session: &SessionHandle, title: &str) -> Result<PaneHandle>;
-    fn close_pane(&self, pane: &PaneHandle) -> Result<()>;
-    fn list_panes(&self, session: &SessionHandle) -> Result<Vec<PaneInfo>>;
-    fn set_layout(&self, session: &SessionHandle, layout: Layout) -> Result<()>;
-    fn send_content(&self, pane: &PaneHandle, content: &str) -> Result<()>;
-}
-```
-
-v1 implements only `TmuxBackend`. The trait abstraction allows adding Zellij/Screen backends in the future.
-
----
-
 ## Keyboard Shortcuts
 
 Vim-style key bindings:
@@ -365,8 +310,7 @@ Vim-style key bindings:
 | `/` | Global | Open filter input overlay |
 | `b` | Global | Toggle sidebar visibility |
 | `p` | Global | Toggle progress entry visibility (independent of `--verbose`) |
-| `t` | Global | Spawn tmux panes for current session's agents (requires tmux) |
-| `q` | Global | Quit cc-tail. If tmux panes are active, prompts for confirmation: "Quit and close N panes? (y/n)". No confirmation if no panes. |
+| `q` | Global | Quit cc-tail |
 | `?` | Global | Show help overlay — static list of all keyboard shortcuts. No contextual info. |
 
 ### Filter Input (`/`)
@@ -499,7 +443,6 @@ This handles the race condition where cc-tail reads a file mid-write by Claude C
 When a new `*.jsonl` file appears under `{sessionId}/subagents/`, cc-tail:
 1. Detects the new file via the recursive watcher — **immediately adds** the subagent to the sidebar and begins tailing. No waiting for correlation with the parent's Task tool_use block.
 2. Begins tailing the new file for live updates
-3. If tmux panes are spawned for this session, creates a new pane running `cc-tail stream --replay 0` for the subagent
 
 ---
 
@@ -513,7 +456,7 @@ When a new `*.jsonl` file appears under `{sessionId}/subagents/`, cc-tail:
 
 ### Signal Handling
 
-- **SIGINT (Ctrl+C)**: graceful shutdown — restore terminal state, kill all spawned tmux panes, exit
+- **SIGINT (Ctrl+C)**: graceful shutdown — restore terminal state, exit
 - **SIGTERM**: same as SIGINT
 - **SIGKILL**: terminal state may be corrupted — user runs `reset` to fix
 
@@ -543,12 +486,6 @@ theme = "dark"
 timestamps = true
 # Timestamp format
 timestamp_format = "%H:%M:%S"
-
-[tmux]
-# Session name prefix
-session_prefix = "cc-tail"
-# Layout style: "tiled", "even-horizontal", "even-vertical"
-layout = "tiled"
 ```
 
 CLI flags override config file values.
@@ -644,10 +581,6 @@ Publish on GitHub Releases using **GitHub Actions with native runners** (macOS +
 - Input-only tool call summaries (no tool_result parsing, no pending state)
 - Content blocks rendered in original array order (unknown blocks inline)
 - Progress entry toggle via `p` key (independent of `--verbose`)
-- tmux pane spawning per agent via `cc-tail stream --replay 0` instances (triggered via `t` key)
-- No tmux pane count limit
-- Panes persist across session switches; killed+respawned only when `t` pressed for new session
-- Quit confirmation when tmux panes are active
 - Project auto-detection from cwd with parent-walk and git-root fallback + `--project` override (strict cwd match, single directory)
 - Session auto-attach (most recently active) + `--session` override
 - Session replay on startup and switch (last 20 visible messages total across all agents, full file scan)
@@ -666,7 +599,7 @@ Publish on GitHub Releases using **GitHub Actions with native runners** (macOS +
 - Silent skip of malformed JSONL lines
 - Hybrid JSONL parsing (typed top-level struct + Value for content blocks)
 - Native filesystem watchers only (no polling fallback)
-- Signal handling (SIGINT + SIGTERM cleanup with tmux pane teardown)
+- Signal handling (SIGINT + SIGTERM cleanup)
 - Unit + integration test suite (no watcher tests, no TUI rendering tests)
 - macOS + Linux only (no Windows)
 - CI via GitHub Actions with native runners (macOS + Linux matrix)
@@ -678,11 +611,8 @@ Publish on GitHub Releases using **GitHub Actions with native runners** (macOS +
 - Progressive tool call rendering (show pending state, update on result)
 - Tool result parsing (exit codes, line counts, match counts)
 - `--raw` / streaming mode for non-TTY output (pipe-friendly)
-- Zellij backend
-- Screen backend
 - Additional filters: `--model`, `--type`, `--exclude`
 - Filter expression language
-- Auto-close idle tmux panes (configurable timeout)
 - Desktop/terminal notifications
 - Collapsible tool call detail (expand to see full input/output)
 - Session timeline view / summary mode

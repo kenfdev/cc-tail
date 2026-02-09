@@ -14,7 +14,6 @@ use crate::replay::{replay_session, DEFAULT_REPLAY_COUNT};
 use crate::ring_buffer::RingBuffer;
 use crate::session::{classify_new_file, Agent, NewFileKind, Session};
 use crate::theme::ThemeColors;
-use crate::tmux::TmuxManager;
 use crate::tui::filter_overlay::{FilterOverlayState, OverlayAction};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -170,15 +169,10 @@ pub struct App {
     /// Per-file EOF offsets from the last replay, used to hand off to the
     /// watcher so it starts tailing from where replay left off.
     pub replay_offsets: HashMap<PathBuf, u64>,
-    /// tmux pane lifecycle manager.
-    pub tmux_manager: TmuxManager,
-    /// Transient status message shown in the status bar (e.g. tmux feedback).
+    /// Transient status message shown in the status bar.
     /// Cleared after a few ticks or on the next key press.
     pub status_message: Option<String>,
-    /// Whether a quit confirmation is pending (shown when tmux panes are active).
-    pub quit_confirm_pending: bool,
     /// The resolved project directory path used by the TUI.
-    /// Needed to derive the tmux session name.
     pub project_path: Option<PathBuf>,
     /// Whether the help overlay is currently visible.
     pub help_overlay_visible: bool,
@@ -203,7 +197,6 @@ impl App {
     /// - Empty sessions list
     pub fn new(config: AppConfig) -> Self {
         let theme_colors = ThemeColors::from_theme(&config.theme);
-        let tmux_layout = config.tmux.layout.clone();
         Self {
             focus: Focus::Sidebar,
             sidebar_visible: true,
@@ -220,9 +213,7 @@ impl App {
             filter_state: FilterState::default(),
             filter_overlay: FilterOverlayState::default(),
             replay_offsets: HashMap::new(),
-            tmux_manager: TmuxManager::new(tmux_layout),
             status_message: None,
-            quit_confirm_pending: false,
             project_path: None,
             help_overlay_visible: false,
             project_display_name: None,
@@ -255,22 +246,6 @@ impl App {
             return;
         }
 
-        // Handle quit confirmation dialog.
-        if self.quit_confirm_pending {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.tmux_manager.cleanup();
-                    self.quit_confirm_pending = false;
-                    self.should_quit = true;
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.quit_confirm_pending = false;
-                }
-                _ => {} // Ignore other keys while confirmation is pending.
-            }
-            return;
-        }
-
         // When the filter overlay is visible, delegate ALL key events to it.
         if self.filter_overlay.visible {
             let action = self.filter_overlay.on_key(key);
@@ -299,14 +274,6 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.open_filter_overlay();
-                return;
-            }
-            KeyCode::Char('t') => {
-                self.open_tmux_panes();
-                return;
-            }
-            KeyCode::Char('T') => {
-                self.close_tmux_panes();
                 return;
             }
             KeyCode::Tab => {
@@ -373,103 +340,8 @@ impl App {
     }
 
     /// Initiate the quit process.
-    ///
-    /// If tmux panes are active, shows a confirmation prompt instead of
-    /// quitting immediately. Otherwise, quits directly.
     fn initiate_quit(&mut self) {
-        if self.tmux_manager.pane_count() > 0 {
-            self.quit_confirm_pending = true;
-        } else {
-            self.should_quit = true;
-        }
-    }
-
-    // -- tmux integration ----------------------------------------------------
-
-    /// Handle the `t` key: spawn tmux panes for all agents in the active session.
-    ///
-    /// Checks whether we are inside tmux, whether a session is selected,
-    /// and then delegates to `TmuxManager::spawn_panes`.
-    fn open_tmux_panes(&mut self) {
-        use crate::tmux;
-
-        // Must be inside tmux.
-        if !tmux::is_inside_tmux() {
-            self.status_message = Some("Not inside tmux (start tmux first)".to_string());
-            return;
-        }
-
-        // Need an active session to know which agents to spawn panes for.
-        let session_id = match &self.active_session_id {
-            Some(id) => id.clone(),
-            None => {
-                self.status_message = Some("Select a session first (Enter on sidebar)".to_string());
-                return;
-            }
-        };
-
-        // Find the active session.
-        let session = match self.sessions.iter().find(|s| s.id == session_id) {
-            Some(s) => s.clone(),
-            None => {
-                self.status_message = Some("Active session not found".to_string());
-                return;
-            }
-        };
-
-        // Build the list of (label, log_path) tuples for all agents.
-        let agent_log_paths: Vec<(String, PathBuf)> = session
-            .agents
-            .iter()
-            .map(|a| {
-                let label = if a.is_main {
-                    "main".to_string()
-                } else {
-                    a.slug
-                        .as_deref()
-                        .or(a.agent_id.as_deref())
-                        .unwrap_or("agent")
-                        .to_string()
-                };
-                (label, a.log_path.clone())
-            })
-            .collect();
-
-        if agent_log_paths.is_empty() {
-            self.status_message = Some("No agents to spawn panes for".to_string());
-            return;
-        }
-
-        match self
-            .tmux_manager
-            .spawn_panes(&agent_log_paths)
-        {
-            Ok(count) => {
-                self.status_message = Some(format!(
-                    "tmux: spawned {} pane{}",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                ));
-            }
-            Err(e) => {
-                self.status_message = Some(format!("tmux error: {}", e));
-            }
-        }
-    }
-
-    /// Handle the `T` key: close all tmux panes without quitting the TUI.
-    fn close_tmux_panes(&mut self) {
-        let count = self.tmux_manager.pane_count();
-        if count == 0 {
-            self.status_message = Some("No tmux panes to close".to_string());
-            return;
-        }
-        self.tmux_manager.cleanup();
-        self.status_message = Some(format!(
-            "tmux: closed {} pane{}",
-            count,
-            if count == 1 { "" } else { "s" }
-        ));
+        self.should_quit = true;
     }
 
     // -- Focus ---------------------------------------------------------------
@@ -583,7 +455,7 @@ impl App {
         }
 
         // Ignore mouse events when overlays are active.
-        if self.help_overlay_visible || self.filter_overlay.visible || self.quit_confirm_pending {
+        if self.help_overlay_visible || self.filter_overlay.visible {
             return;
         }
 
@@ -1590,60 +1462,13 @@ mod tests {
         assert!(app.active_filters.is_empty());
     }
 
-    // -- tmux integration tests -----------------------------------------------
+    // -- Status message tests ------------------------------------------------
 
     #[test]
-    fn test_new_defaults_tmux_fields() {
+    fn test_new_defaults_status_fields() {
         let app = App::new(test_config());
         assert!(app.status_message.is_none());
-        assert!(!app.quit_confirm_pending);
         assert!(app.project_path.is_none());
-        assert_eq!(app.tmux_manager.pane_count(), 0);
-    }
-
-    #[test]
-    fn test_t_key_without_tmux_shows_status_message() {
-        let mut app = App::new(test_config());
-        // Ensure TMUX env is not set for this test.
-        let original = std::env::var("TMUX").ok();
-        std::env::remove_var("TMUX");
-
-        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-
-        // Should show a status message about an error condition.
-        // Due to test parallelism with env vars, we might hit "not inside tmux"
-        // or fall through to "Select a session first" (if another test
-        // concurrently restores the TMUX var). Both are valid error paths.
-        assert!(app.status_message.is_some());
-        let msg = app.status_message.as_ref().unwrap();
-        assert!(
-            msg.contains("tmux")
-                || msg.contains("not inside")
-                || msg.contains("session")
-                || msg.contains("Select"),
-            "expected error status message, got: {}",
-            msg
-        );
-        assert!(!app.should_quit);
-
-        // Restore TMUX env var.
-        if let Some(val) = original {
-            std::env::set_var("TMUX", val);
-        }
-    }
-
-    #[test]
-    fn test_t_key_does_not_work_when_overlay_is_open() {
-        let mut app = App::new(test_config());
-        // Open the overlay.
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
-
-        // 't' inside overlay should type into the pattern input.
-        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-        assert_eq!(app.filter_overlay.pattern_input, "t");
-        // Status message should not be set (the overlay consumed the key).
-        // Note: status_message is cleared at the start of on_key.
     }
 
     #[test]
@@ -1655,81 +1480,6 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         assert!(app.status_message.is_none());
     }
-
-    #[test]
-    fn test_q_quits_without_confirmation_when_no_tmux_panes() {
-        let mut app = App::new(test_config());
-        // No tmux panes active.
-        assert_eq!(app.tmux_manager.pane_count(), 0);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(app.should_quit);
-        assert!(!app.quit_confirm_pending);
-    }
-
-    #[test]
-    fn test_quit_confirm_pending_blocks_other_keys() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        // Unknown key should be ignored.
-        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert!(app.quit_confirm_pending);
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn test_quit_confirm_y_quits() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert!(app.should_quit);
-        assert!(!app.quit_confirm_pending);
-    }
-
-    #[test]
-    fn test_quit_confirm_n_cancels() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert!(!app.should_quit);
-        assert!(!app.quit_confirm_pending);
-    }
-
-    #[test]
-    fn test_quit_confirm_esc_cancels() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.should_quit);
-        assert!(!app.quit_confirm_pending);
-    }
-
-    #[test]
-    fn test_quit_confirm_capital_y_quits() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        app.on_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn test_ctrl_c_quits_without_confirmation_when_no_panes() {
-        let mut app = App::new(test_config());
-        assert_eq!(app.tmux_manager.pane_count(), 0);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit);
-        assert!(!app.quit_confirm_pending);
-    }
-
-    // test_t_key_without_project_path_shows_error removed: the project_path
-    // check no longer exists in open_tmux_panes(). Already covered by
-    // test_t_key_without_active_session_shows_error.
 
     // -- Help overlay tests ---------------------------------------------------
 
@@ -1787,44 +1537,6 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(!app.help_overlay_visible);
         assert!(app.filter_overlay.visible);
-    }
-
-    #[test]
-    fn test_question_mark_does_not_open_help_when_quit_confirm_active() {
-        let mut app = App::new(test_config());
-        app.quit_confirm_pending = true;
-
-        // '?' while quit confirm is pending should be ignored (not open help).
-        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        assert!(!app.help_overlay_visible);
-        // quit_confirm_pending should still be true (unknown key is ignored).
-        assert!(app.quit_confirm_pending);
-    }
-
-    #[test]
-    fn test_t_key_without_active_session_shows_error() {
-        let mut app = App::new(test_config());
-        app.active_session_id = None;
-
-        // Set TMUX env to simulate being inside tmux.
-        let original = std::env::var("TMUX").ok();
-        std::env::set_var("TMUX", "/tmp/tmux/default,1234,0");
-
-        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-
-        assert!(app.status_message.is_some());
-        let msg = app.status_message.as_ref().unwrap();
-        assert!(
-            msg.contains("session") || msg.contains("Select"),
-            "expected session selection message, got: {}",
-            msg
-        );
-
-        // Restore TMUX env var.
-        match original {
-            Some(val) => std::env::set_var("TMUX", val),
-            None => std::env::remove_var("TMUX"),
-        }
     }
 
     // -- on_new_file_detected tests -------------------------------------------
@@ -2258,22 +1970,6 @@ mod tests {
         assert!(app.pending_scroll.is_none());
     }
 
-    #[test]
-    fn test_on_mouse_ignored_when_quit_confirm_pending() {
-        use crossterm::event::{MouseEvent, MouseEventKind};
-
-        let mut app = App::new(test_config());
-        app.focus = Focus::LogStream;
-        app.quit_confirm_pending = true;
-        app.on_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
-        assert!(app.pending_scroll.is_none());
-    }
-
     // -- Half-page scroll (u/d) tests ----------------------------------------
 
     #[test]
@@ -2350,34 +2046,4 @@ mod tests {
         assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 15);
     }
 
-    // -- Close tmux panes (T) tests ------------------------------------------
-
-    #[test]
-    fn test_capital_t_key_no_panes_shows_status() {
-        let mut app = App::new(test_config());
-        assert_eq!(app.tmux_manager.pane_count(), 0);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
-
-        assert!(app.status_message.is_some());
-        let msg = app.status_message.as_ref().unwrap();
-        assert!(
-            msg.contains("No tmux panes"),
-            "expected 'No tmux panes' message, got: {}",
-            msg
-        );
-        assert!(!app.should_quit);
-    }
-
-    #[test]
-    fn test_capital_t_key_does_not_work_when_overlay_is_open() {
-        let mut app = App::new(test_config());
-        // Open the filter overlay.
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
-
-        // 'T' inside overlay should type into the pattern input.
-        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
-        assert_eq!(app.filter_overlay.pattern_input, "T");
-    }
 }

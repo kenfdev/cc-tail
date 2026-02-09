@@ -217,9 +217,6 @@ pub fn run_tui(config: AppConfig) -> io::Result<()> {
         handle.shutdown();
     }
 
-    // Clean up tmux panes (best-effort).
-    app.tmux_manager.cleanup();
-
     // Always restore terminal, even if the event loop returned an error.
     restore_terminal(&mut terminal)?;
 
@@ -236,8 +233,7 @@ const MAX_DRAIN_PER_TICK: usize = 200;
 /// The core event loop: draw, poll, handle, repeat.
 ///
 /// Checks the `shutdown_flag` each tick. When set by the signal handler,
-/// the loop performs a force-quit (bypassing the quit confirmation dialog)
-/// to ensure clean terminal restoration and tmux cleanup.
+/// the loop performs a force-quit to ensure clean terminal restoration.
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -311,16 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn test_shutdown_flag_forces_quit_bypassing_confirmation() {
+    fn test_shutdown_flag_forces_quit() {
         // When the shutdown flag is set, the event loop should set
-        // should_quit = true directly, bypassing initiate_quit().
-        // This means it should NOT set quit_confirm_pending even
-        // when tmux panes are tracked.
+        // should_quit = true directly.
         let mut app = App::new(AppConfig::default());
-
-        // Simulate having tmux panes active (which would normally
-        // trigger a confirmation dialog via initiate_quit()).
-        app.quit_confirm_pending = false;
 
         // Simulate what the event loop does when shutdown_flag is true:
         let shutdown_flag = Arc::new(AtomicBool::new(true));
@@ -328,10 +318,7 @@ mod tests {
             app.should_quit = true;
         }
 
-        // should_quit should be true (force quit) and
-        // quit_confirm_pending should remain false (bypassed).
         assert!(app.should_quit);
-        assert!(!app.quit_confirm_pending);
     }
 
     #[test]
