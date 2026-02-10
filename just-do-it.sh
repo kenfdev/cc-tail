@@ -34,7 +34,21 @@ cmd="/jdi run"
 [[ -n "$workflow" ]] && cmd="$cmd --workflow $workflow"
 [[ -n "$task_id" ]] && cmd="$cmd --task $task_id"
 
-trap 'echo ""; echo "Interrupted"; rm -f .jdi/locks/*.lock 2>/dev/null; exit 130' INT TERM
+_outfile=$(mktemp)
+_claude_pid=""
+cleanup() { rm -f "$_outfile" 2>/dev/null; }
+trap 'cleanup' EXIT
+trap '
+    echo ""
+    echo "Interrupted"
+    if [[ -n "$_claude_pid" ]]; then
+        kill "$_claude_pid" 2>/dev/null
+        kill -9 "$_claude_pid" 2>/dev/null
+        wait "$_claude_pid" 2>/dev/null
+    fi
+    rm -f .jdi/locks/*.lock 2>/dev/null
+    exit 130
+' INT TERM
 
 iteration=0
 while true; do
@@ -47,8 +61,11 @@ while true; do
     echo "--- Iteration $iteration${max:+/$max} ---"
 
     claude_exit=0
-    claude -p "$cmd" 2>&1 | tail -20 || true
-    claude_exit=${PIPESTATUS[0]}
+    claude -p "$cmd" >"$_outfile" 2>&1 &
+    _claude_pid=$!
+    wait "$_claude_pid" || claude_exit=$?
+    _claude_pid=""
+    tail -20 "$_outfile"
 
     if [[ $claude_exit -eq 130 ]] || [[ $claude_exit -eq 143 ]]; then
         echo "Interrupted"

@@ -15,3 +15,15 @@
 **Trigger:** REJECTED
 
 **Lesson:** `build_stream_command()` in `src/tmux.rs` constructs a shell command string via `format!` without quoting the binary path or log file path. Since `tmux split-window` passes this string to `sh -c`, file paths with spaces or shell metacharacters can cause word-splitting or arbitrary command execution. Shell-quote all interpolated values in command strings that will be interpreted by a shell.
+
+## 2026-02-10 - Task #152, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** Unicode case-folding via `to_lowercase()` can change the byte length of strings. When using byte positions from a lowercased copy to index into the original text, this creates a desynchronization that can cause panics at non-UTF-8 byte boundaries. When implementing case-insensitive substring matching that returns byte positions, ensure positions map back to the original text, not the lowered copy. This is a general pattern: any text transformation that changes string length invalidates byte-offset math.
+
+## 2026-02-10 - Task #179, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** The `find_matches()` function performs case-insensitive search by lowercasing both text and query, then returns byte offsets from the lowercased text. These offsets are later used to slice the original (non-lowercased) text in `highlight_line()`. When multi-byte Unicode characters change byte length during case conversion (e.g., German ß→ss, Turkish İ→i̇), the byte offsets become misaligned, causing potential panics. Byte offsets from string transformations must always be validated against or computed from the target string they will be applied to.
