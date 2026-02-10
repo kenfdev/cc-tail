@@ -150,15 +150,15 @@ Implement the dynamic priority status bar showing active filters, inactive badge
 
 ---
 
-## 13. Filter System & Overlay
+## 13. Filter Menu (`f` key)
 
-Implement the filter trait, concrete filters (text regex, role, agent), AND combinator, the `/` overlay UI, and retroactive filtering.
+Simple menu-style filter overlay with two filter dimensions: tool call hiding and agent filtering. Replaces the previous complex regex/role/agent filter overlay.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Plan | `[x]` | `MessageFilter` trait design, combinator pattern, overlay widget layout, real-time regex validation |
-| Implement | `[x]` | `filter.rs` + `tui/filter_overlay.rs` (851 lines). `MessageFilter` trait + `RegexFilter`, `RoleFilter`, `AgentFilter`. `FilterState` with composition. `draw_filter_overlay()` modal with pattern input, role/agent toggles. Keyboard navigation (Tab/Enter/Esc). Real-time regex validation (green/red border). Retroactive: on filter change, re-iterate ring buffer. Update status bar. |
-| Review | `[x]` | Unit tests for filter matching logic. Manual testing: overlay UX, regex validation feedback, retroactive re-render. |
+| Plan | `[x]` | Two-level filtering: entry-level (agent) + line-level (tool call hiding). Menu-style overlay with radio buttons for agents and checkbox for tool calls. |
+| Implement | `[x]` | **Rewritten**: `filter.rs` (~90 lines, 21 tests): Simple `FilterState { hide_tool_calls, selected_agent }` with `is_active()`, `matches()`, `is_tool_line_visible()`, `display()`. Removed `MessageFilter` trait, `RegexFilter`, `RoleFilter`, `AgentFilter`, `AndFilter`. `tui/filter_overlay.rs` (~190 lines, 30 tests): `FilterMenuState` with `FilterMenuItem` enum (ToolCallToggle, AgentAll, Agent), `MenuAction` (Consumed, Close, Selected). Navigate j/k, select Enter/Space, close Esc/f. `tui/app.rs`: `f` key opens menu, `/` unbound (reserved for search). `ActiveFilters` struct removed. `apply_filter_from_menu()` applies immediately on selection. `tui/ui.rs`: `draw_filter_menu()` centered popup with highlighted selection. Tool call line hiding in `draw_logstream()` via `RenderedLine::ToolUse` skip. Status bar shows `[filter: no tools]`, `[filter: agent cook]`, etc. Shortcuts changed `/:filter` to `f:filter`. `replay.rs`: Compatible with new FilterState; 2 tests rewritten. 614 tests total, zero clippy warnings. |
+| Review | `[x]` | 51 new unit tests across filter.rs (21) and filter_overlay.rs (30). Integration tests in app.rs. Smoke tests in ui.rs. All 614 tests pass, `cargo clippy` clean. |
 
 ---
 
@@ -234,15 +234,15 @@ Handle SIGINT/SIGTERM for clean terminal restoration.
 
 ---
 
-## 20. Help Overlay
+## 20. Help Overlay (Enhanced)
 
-Show a static keyboard shortcut reference on `?` key press.
+Rich three-section help screen with symbol legend, keybinding reference, and live session stats.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Plan | `[x]` | Overlay layout, shortcut list content |
-| Implement | `[x]` | `tui/app.rs` + `tui/ui.rs`. `help_overlay_visible` flag in App. `draw_help_overlay()` renders keybindings modal. `?` key handler toggles. Displays keybindings including `u/d` (half-page scroll). Clear widget for modal overlay. Any key dismisses. |
-| Review | `[x]` | Manual testing: overlay appearance, dismissal, terminal size edge cases. |
+| Plan | `[x]` | Three-section overlay: symbol/color legend, complete keybinding reference (including future keys), session stats computed from ring buffer |
+| Implement | `[x]` | **New file: `session_stats.rs` (~250 lines)**: `SessionStats` struct + `compute_session_stats()`. Pure logic, 23 unit tests. Counts messages (user/assistant), tool calls with per-tool breakdown (only `tool_use`, not `tool_result`), subagent count, session duration from timestamps. ISO 8601 parser (no chrono dependency). **`tui/ui.rs`**: Rewrote `draw_help_overlay()` with 3 sections: (1) Symbol & Color Legend showing `>/</?/~/\u{25b6}` with colors + agent prefix + timestamp notes, (2) Complete Keybinding Reference with 17 entries including future keys (`n/N`, `f`, `L`), (3) Session Stats (duration, message counts, tool call count + top-5 breakdown, subagent count, entries loaded). ~70x45 overlay, degrades gracefully on small terminals. **`tui/app.rs`**: Changed help key handling -- `?` toggles, `Esc` closes (replaced "any key dismisses"). Updated 6 tests. **`main.rs`**: Added `mod session_stats`. Total: 635 tests passing, zero clippy warnings. |
+| Review | `[x]` | 23 new unit tests in session_stats.rs. Existing help overlay smoke tests in ui.rs updated. All 635 tests pass, `cargo clippy -- -D warnings` clean. |
 
 ---
 
@@ -270,6 +270,54 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 
 ---
 
+## 23. Search with Highlighting, Navigation, and Match Counter (Feature 2)
+
+Vim/less-style search with case-insensitive substring matching, in-place highlighting, `n`/`N` navigation, and a `[3/17]` match counter.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Three-state machine (Inactive/Input/Active), post-process highlight approach, reuse status bar for input, force scroll mode on search confirm |
+| Implement | `[x]` | **New file: `src/search.rs` (~250 lines)**: `SearchState`, `SearchMode`, `SearchMatch`, `find_matches()` (case-insensitive non-overlapping substring matching), state machine methods (`start_input`, `on_char`, `on_backspace`, `confirm`, `cancel`, `next_match`, `prev_match`, `match_counter_display`). 30 unit tests. **`src/main.rs`**: Added `mod search`. **`src/theme.rs`**: 6 new search color fields (`search_match_bg/fg`, `search_current_bg/fg`, `search_input_fg`, `search_prompt`) for both dark and light themes. **`src/tui/app.rs`**: Added `search_state: SearchState` field, search input/active mode key handling (`/` opens input, `Enter` confirms, `Esc` cancels, `n`/`N` navigate, `Ctrl+C` cancels input), `force_scroll_mode_for_search()`, `scroll_to_current_search_match()`, `cancel_search()`. Search cancelled on filter change and session switch. 15 new unit tests. **`src/tui/ui.rs`**: `draw_search_input_bar()` replaces status bar during input mode, `line_to_text()`, `apply_search_highlights()` (post-process span splitting), `highlight_line()` (per-line match highlighting with current match distinction). Search match computation in `draw_logstream()`. Match counter `[n/N]` in status bar. Updated shortcuts to include `/:search`. Help overlay updated with search keybindings. 10 new rendering tests. Total: 682 tests, zero clippy warnings. |
+| Review | `[x]` | 55 new unit tests across search.rs (30), app.rs (15), ui.rs (10). All 682 tests pass, `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 24. Full History Load (`L` key) (Feature 1)
+
+Load the entire session history on demand with `Shift+L`, replacing the default 20-message replay with all visible entries.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | `L` key handler, file size check with 50 MB confirmation threshold, y/n/Esc confirmation flow, scroll position preservation |
+| Implement | `[x]` | **`src/replay.rs`**: Added `session_file_size()` (sum agent file sizes, handles missing files) and `load_full_session()` (calls `replay_session` with `usize::MAX`). 3 new tests. **`src/tui/app.rs`**: Added `full_history_loaded`, `full_load_confirm_pending`, `full_load_pending_size_mb` fields. `L` key handler with active session check, size threshold check (50 MB), confirmation prompt interceptor (y/n/Esc before all other handlers). `perform_full_history_load()` replaces ring buffer, restores scroll position, cancels search, sets flag. `get_active_session()` helper. Session switch resets `full_history_loaded`. 10 new tests. **`src/tui/ui.rs`**: "FULL" badge (green bg) in status bar when loaded. Confirmation prompt text in status bar. `L` added to help overlay keybindings. Total: 701 tests, zero clippy warnings. |
+| Review | `[x]` | 13 new unit tests across replay.rs (3), app.rs (10). All 701 tests pass, `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 25. ASCII Fallback (`--ascii` flag) (Feature 5)
+
+Provide an `--ascii` CLI flag (and config file option) that replaces Unicode glyphs with ASCII-safe characters for terminal compatibility.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | `Symbols` struct with unicode/ascii modes, `--ascii` CLI flag, config file support, replace 5 hardcoded Unicode references in ui.rs |
+| Implement | `[x]` | **New file: `src/symbols.rs` (~100 lines)**: `Symbols` struct with `active_marker`, `tree_connector`, `progress_indicator`, `search_cursor` fields. `unicode()`, `ascii()`, and `new(bool)` constructors. 4 unit tests. **`src/cli.rs`**: Added `--ascii` flag (default false). **`src/config.rs`**: Added `ascii: bool` to `AppConfig` and `ascii: Option<bool>` to `FileConfig`. Wired through `build_config` (file then CLI override). Updated test helper. **`src/main.rs`**: Added `mod symbols`. **`src/tui/app.rs`**: Added `symbols: Symbols` field, initialized from `config.ascii`. 2 new tests. **`src/tui/ui.rs`**: Replaced 5 hardcoded Unicode references with `app.symbols.*`: sidebar active marker (line 142), tree connector (line 190), progress indicator (line 371), search cursor (line 853), help legend progress (line 1017). Total: 701 tests, zero clippy warnings. |
+| Review | `[x]` | 6 new unit tests across symbols.rs (4), app.rs (2). All 701 tests pass, `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 26. Search Highlight Bug Fixes (focused match color + Esc cleanup)
+
+Fix two search-related bugs: (1) focused match has no distinct color when navigating with n/N, and (2) highlights persist after Esc cancels search.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Root cause: Branch A renders stale snapshots with baked-in highlights. Fix via snapshot invalidation on n/N/Esc, auto-select first match, scroll-to-match after snapshot creation, and improved current-match colors. |
+| Implement | `[x]` | **`src/tui/app.rs`**: Added `invalidate_scroll_snapshot()` method that converts active scroll mode back to pending scroll, preserving offset. Updated `n`/`N` handlers to call `invalidate_scroll_snapshot()` instead of `scroll_to_current_search_match()`. Updated `Esc` handler in search active mode to call `invalidate_scroll_snapshot()` after cancel. **`src/tui/ui.rs`**: Added auto-selection of first match when `current_match_index` is `None` and matches exist. In Branch B, moved `scroll_mode` assignment before paragraph creation, added `scroll_to_current_search_match()` call after snapshot creation when search is active. Resolved borrow checker issue by copying `logstream_text` color before mutable borrow. **`src/theme.rs`**: Changed dark theme `search_current_bg` from `LightYellow` to `Magenta`, `search_current_fg` from `Black` to `White`. Changed light theme `search_current_bg` from `LightYellow` to `Blue`, `search_current_fg` from `Black` to `White`. **UTF-8 safety fix in `src/search.rs`**: Rewrote `find_matches()` to build a byte-offset mapping (`build_lower_to_orig_map`) from lowercased text positions back to original text positions, preventing panics when characters change byte length during case conversion (e.g., Turkish İ U+0130: 2 bytes orig -> 3 bytes lowered, German ẞ U+1E9E: 3 bytes orig -> 2 bytes lowered). Added `map_lower_to_orig()` with binary search lookup. 10 new UTF-8 tests covering emoji, CJK, Turkish İ, German ẞ, accented characters, and comprehensive boundary safety. All 711 tests pass. |
+| Review | `[x]` | Code quality review: APPROVED. Security review: APPROVED. UTF-8 byte boundary fix applied with `build_lower_to_orig_map()` and `map_lower_to_orig()` helpers. 10 new multi-byte character tests (emoji, CJK, Turkish I, German eszett, accented characters). Additional fix: `force_scroll_mode_for_search()` now invalidates the scroll snapshot when already in scroll mode, so search highlights appear immediately on Enter (previously showed `[0/0]` until pressing `n`). All 711 tests pass, zero clippy warnings. |
+
+---
+
 ## Summary
 
 | # | Feature | Plan | Implement | Review |
@@ -286,13 +334,17 @@ Set up GitHub Actions for build/test on macOS + Linux, and release binary publis
 | 10 | Sidebar Widget | `[x]` | `[x]` | `[x]` |
 | 11 | Log Stream Widget | `[x]` | `[x]` | `[x]` |
 | 12 | Status Bar | `[x]` | `[x]` | `[x]` |
-| 13 | Filter System & Overlay | `[x]` | `[x]` | `[x]` |
+| 13 | Filter Menu (`f` key) | `[x]` | `[x]` | `[x]` |
 | 14 | Session Replay | `[x]` | `[x]` | `[x]` |
 | 15 | Progress Entry Toggle (REMOVED) | `[x]` | `[x]` | `[x]` |
 | 16 | Theme Support | `[x]` | `[x]` | `[x]` |
 | 17 | `stream` Subcommand | `[x]` | `[x]` | `[x]` |
 | 18 | tmux Integration (REMOVED) | `[x]` | `[x]` | `[x]` |
 | 19 | Signal Handling & Graceful Shutdown | `[x]` | `[x]` | `[x]` |
-| 20 | Help Overlay | `[x]` | `[x]` | `[x]` |
+| 20 | Help Overlay (Enhanced) | `[x]` | `[x]` | `[x]` |
 | 21 | Log Stream Scroll Mode | `[x]` | `[x]` | `[x]` |
 | 22 | CI & Distribution | `[x]` | `[x]` | `[x]` |
+| 23 | Search (Feature 2) | `[x]` | `[x]` | `[x]` |
+| 24 | Full History Load (Feature 1) | `[x]` | `[x]` | `[x]` |
+| 25 | ASCII Fallback (Feature 5) | `[x]` | `[x]` | `[x]` |
+| 26 | Search Highlight Bug Fixes | `[x]` | `[x]` | `[x]` |
