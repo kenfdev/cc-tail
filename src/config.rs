@@ -15,6 +15,7 @@ use crate::cli::{Cli, Theme};
 struct FileConfig {
     verbose: Option<bool>,
     theme: Option<String>,
+    ascii: Option<bool>,
     display: FileDisplayConfig,
 }
 
@@ -35,6 +36,7 @@ pub struct AppConfig {
     pub session: Option<String>,
     pub verbose: bool,
     pub theme: Theme,
+    pub ascii: bool,
     pub display: DisplayConfig,
 }
 
@@ -51,6 +53,7 @@ impl Default for AppConfig {
             session: None,
             verbose: false,
             theme: Theme::Dark,
+            ascii: false,
             display: DisplayConfig::default(),
         }
     }
@@ -146,6 +149,9 @@ pub fn build_config(cli: &Cli) -> AppConfig {
                     config.theme = theme;
                 }
             }
+            if let Some(a) = file_cfg.ascii {
+                config.ascii = a;
+            }
             if let Some(ts) = file_cfg.display.timestamps {
                 config.display.timestamps = ts;
             }
@@ -175,6 +181,9 @@ pub fn build_config(cli: &Cli) -> AppConfig {
     }
     if cli.verbose {
         config.verbose = true;
+    }
+    if cli.ascii {
+        config.ascii = true;
     }
     if let Some(ref theme) = cli.theme {
         config.theme = theme.clone();
@@ -212,6 +221,7 @@ mod tests {
             session: None,
             verbose: false,
             theme: None,
+            ascii: false,
             config: None,
             command: None,
         }
@@ -399,6 +409,7 @@ theme = "light"
             config: Some(f.path().to_path_buf()),
             verbose: true,
             theme: Some(Theme::Dark),
+            ascii: false,
             project: Some(PathBuf::from("/my/project")),
             session: Some("abc123".to_string()),
             command: None,

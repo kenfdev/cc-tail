@@ -24,6 +24,10 @@ pub struct Cli {
     #[arg(long, value_enum)]
     pub theme: Option<Theme>,
 
+    /// Use ASCII characters instead of Unicode symbols for better compatibility.
+    #[arg(long, default_value_t = false)]
+    pub ascii: bool,
+
     /// Path to config file
     #[arg(long)]
     pub config: Option<PathBuf>,

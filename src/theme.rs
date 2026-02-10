@@ -118,6 +118,20 @@ pub struct ThemeColors {
     pub filter_main_focused: Color,
     /// Main agent toggle foreground (unfocused).
     pub filter_main_unfocused: Color,
+
+    // -- Search ------------------------------------------------------------
+    /// Search match highlight background.
+    pub search_match_bg: Color,
+    /// Search match highlight foreground.
+    pub search_match_fg: Color,
+    /// Current search match highlight background.
+    pub search_current_bg: Color,
+    /// Current search match highlight foreground.
+    pub search_current_fg: Color,
+    /// Search input bar text foreground.
+    pub search_input_fg: Color,
+    /// Search prompt (`/`) foreground.
+    pub search_prompt: Color,
 }
 
 impl ThemeColors {
@@ -195,6 +209,14 @@ impl ThemeColors {
             filter_shortcut_key: Color::Yellow,
             filter_main_focused: Color::Gray,
             filter_main_unfocused: Color::DarkGray,
+
+            // Search
+            search_match_bg: Color::Yellow,
+            search_match_fg: Color::Black,
+            search_current_bg: Color::Magenta,
+            search_current_fg: Color::White,
+            search_input_fg: Color::White,
+            search_prompt: Color::Yellow,
         }
     }
 
@@ -264,6 +286,14 @@ impl ThemeColors {
             filter_shortcut_key: Color::Blue,
             filter_main_focused: Color::DarkGray,
             filter_main_unfocused: Color::Gray,
+
+            // Search
+            search_match_bg: Color::Yellow,
+            search_match_fg: Color::Black,
+            search_current_bg: Color::Blue,
+            search_current_fg: Color::White,
+            search_input_fg: Color::Black,
+            search_prompt: Color::Blue,
         }
     }
 }

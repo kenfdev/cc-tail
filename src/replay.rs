@@ -151,6 +151,32 @@ pub fn replay_session(
     (result, eof_offsets)
 }
 
+/// Compute the total file size (in bytes) of all agent log files in a session.
+///
+/// Files that do not exist or cannot be stat'd are counted as 0 bytes.
+pub fn session_file_size(session: &Session) -> u64 {
+    session
+        .agents
+        .iter()
+        .map(|agent| {
+            std::fs::metadata(&agent.log_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// Load the full history of a session (all visible entries, no limit).
+///
+/// This is equivalent to calling `replay_session` with `max_visible = usize::MAX`.
+pub fn load_full_session(
+    session: &Session,
+    filter: &FilterState,
+    verbose: bool,
+) -> (Vec<LogEntry>, HashMap<PathBuf, u64>) {
+    replay_session(session, filter, usize::MAX, verbose)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -342,33 +368,36 @@ mod tests {
     // =====================================================================
 
     #[test]
-    fn test_filter_reduces_visible_entries() {
+    fn test_agent_filter_reduces_visible_entries() {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("session.jsonl");
 
+        // Write some main agent entries and a subagent entry
         write_jsonl(
             &log_path,
             &[
                 &user_line("2025-01-15T10:00:00Z", "hello world"),
                 &assistant_line("2025-01-15T10:01:00Z", "goodbye world"),
-                &user_line("2025-01-15T10:02:00Z", "hello again"),
+                // Subagent entry (manually crafted)
+                &format!(
+                    r#"{{"type":"assistant","sessionId":"sess","isSidechain":true,"agentId":"sub1","timestamp":"2025-01-15T10:02:00Z","message":{{"role":"assistant","content":[{{"type":"text","text":"sub msg"}}]}}}}"#
+                ),
             ],
         );
 
-        let mut filter = FilterState::default();
-        filter.set_pattern("hello");
+        // Filter to only show subagent "sub1"
+        let filter = FilterState {
+            hide_tool_calls: false,
+            selected_agent: Some("sub1".to_string()),
+        };
 
         let session = make_session("s1", vec![log_path]);
         let (entries, _offsets) = replay_session(&session, &filter, 20, false);
 
-        // Only entries matching "hello" should be returned
-        assert_eq!(entries.len(), 2);
+        // Only the subagent entry should pass the agent filter
+        assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].timestamp.as_deref(),
-            Some("2025-01-15T10:00:00Z")
-        );
-        assert_eq!(
-            entries[1].timestamp.as_deref(),
             Some("2025-01-15T10:02:00Z")
         );
     }
@@ -625,7 +654,7 @@ mod tests {
     // =====================================================================
 
     #[test]
-    fn test_role_filter_interaction() {
+    fn test_default_filter_shows_all_visible_entries() {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("session.jsonl");
 
@@ -638,15 +667,13 @@ mod tests {
             ],
         );
 
-        let mut filter = FilterState::default();
-        filter.enabled_roles.insert("assistant".to_string());
+        let filter = FilterState::default();
 
         let session = make_session("s1", vec![log_path]);
         let (entries, _offsets) = replay_session(&session, &filter, 20, false);
 
-        // Only assistant-role entries should pass the role filter
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].entry_type, EntryType::Assistant);
+        // Default filter (no agent filter) should show all visible entries
+        assert_eq!(entries.len(), 3);
     }
 
     // =====================================================================
@@ -750,5 +777,90 @@ mod tests {
     #[test]
     fn test_default_replay_count() {
         assert_eq!(DEFAULT_REPLAY_COUNT, 20);
+    }
+
+    // =====================================================================
+    // Test 21: session_file_size sums file sizes
+    // =====================================================================
+
+    #[test]
+    fn test_session_file_size() {
+        let tmp = TempDir::new().unwrap();
+        let path1 = tmp.path().join("file1.jsonl");
+        let path2 = tmp.path().join("file2.jsonl");
+
+        write_jsonl(&path1, &[&user_line("2025-01-15T10:00:00Z", "msg-1")]);
+        write_jsonl(
+            &path2,
+            &[
+                &user_line("2025-01-15T10:01:00Z", "msg-2"),
+                &assistant_line("2025-01-15T10:02:00Z", "msg-3"),
+            ],
+        );
+
+        let expected_size = std::fs::metadata(&path1).unwrap().len()
+            + std::fs::metadata(&path2).unwrap().len();
+
+        let session = make_session("s1", vec![path1, path2]);
+        let total = session_file_size(&session);
+        assert_eq!(total, expected_size);
+    }
+
+    // =====================================================================
+    // Test 22: session_file_size handles missing files
+    // =====================================================================
+
+    #[test]
+    fn test_session_file_size_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let existing_path = tmp.path().join("exists.jsonl");
+        let missing_path = PathBuf::from("/nonexistent/missing.jsonl");
+
+        write_jsonl(
+            &existing_path,
+            &[&user_line("2025-01-15T10:00:00Z", "msg")],
+        );
+
+        let expected_size = std::fs::metadata(&existing_path).unwrap().len();
+
+        let session = make_session("s1", vec![existing_path, missing_path]);
+        let total = session_file_size(&session);
+        assert_eq!(total, expected_size);
+    }
+
+    // =====================================================================
+    // Test 23: load_full_session returns ALL entries
+    // =====================================================================
+
+    #[test]
+    fn test_load_full_session_returns_all() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("session.jsonl");
+
+        // Write 30 user entries (more than DEFAULT_REPLAY_COUNT of 20).
+        let lines: Vec<String> = (0..30)
+            .map(|i| {
+                user_line(
+                    &format!("2025-01-15T10:{:02}:00Z", i),
+                    &format!("msg-{}", i),
+                )
+            })
+            .collect();
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        write_jsonl(&log_path, &line_refs);
+
+        let session = make_session("s1", vec![log_path]);
+        let (entries, _offsets) = load_full_session(&session, &default_filter(), false);
+
+        // Should return ALL 30 entries, not just 20
+        assert_eq!(entries.len(), 30);
+        assert_eq!(
+            entries[0].timestamp.as_deref(),
+            Some("2025-01-15T10:00:00Z")
+        );
+        assert_eq!(
+            entries[29].timestamp.as_deref(),
+            Some("2025-01-15T10:29:00Z")
+        );
     }
 }
