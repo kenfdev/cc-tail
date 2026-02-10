@@ -318,6 +318,18 @@ Fix two search-related bugs: (1) focused match has no distinct color when naviga
 
 ---
 
+## 27. Visual-line scroll fix (wrap-aware search and scroll)
+
+Fix scroll system to use visual (wrapped) line counts instead of logical line counts. This fixes search scroll-to-match not showing the current match when lines wrap, and improves general scroll accuracy.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Root cause: `ScrollMode` used logical line counts (`lines.len()`) but ratatui `Paragraph::scroll()` with `Wrap` operates on visual (wrapped) lines. Mismatch causes viewport to miss the current search match. |
+| Implement | `[x]` | **`src/tui/app.rs`**: Added `total_visual_lines` and `inner_width` fields to `ScrollMode`. Added `wrapped_line_height()`, `total_visual_lines()`, `visual_line_position()` helper functions. Updated `apply_scroll()` to use `total_visual_lines` for max_offset. Updated `scroll_to_current_search_match()` to convert logical line index to visual line position. 2 new tests (`test_visual_line_helpers`, `test_scroll_to_search_match_with_wrapping`). **`src/tui/ui.rs`**: Branch A, B, and C all now use visual line counts for ratatui scroll offset calculation. Branch B computes `total_visual_lines` when creating snapshot. All 713 tests pass. |
+| Review | `[x]` | Code quality review: APPROVED. Clippy warning fixed (manual `div_ceil` → `.div_ceil()`). All 713 tests pass. |
+
+---
+
 ## Summary
 
 | # | Feature | Plan | Implement | Review |
@@ -348,3 +360,4 @@ Fix two search-related bugs: (1) focused match has no distinct color when naviga
 | 24 | Full History Load (Feature 1) | `[x]` | `[x]` | `[x]` |
 | 25 | ASCII Fallback (Feature 5) | `[x]` | `[x]` | `[x]` |
 | 26 | Search Highlight Bug Fixes | `[x]` | `[x]` | `[x]` |
+| 27 | Visual-line scroll fix (wrap-aware) | `[x]` | `[x]` | `[x]` |

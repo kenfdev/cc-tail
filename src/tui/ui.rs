@@ -288,15 +288,16 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let inner_height = block.inner(area).height as usize;
+    let inner = block.inner(area);
+    let inner_height = inner.height as usize;
+    let inner_width = inner.width;
 
     // -- Branch A: scroll_mode already active -- render from frozen snapshot.
     if let Some(ref scroll) = app.scroll_mode {
-        // scroll.offset is "lines from the bottom": 0 = bottom, max = top.
-        // Convert to ratatui scroll: ratatui_scroll = max_offset - scroll.offset
-        // where max_offset = total_lines - visible_height (shows the bottom).
-        let max_ratatui = scroll.total_lines.saturating_sub(scroll.visible_height);
-        let ratatui_scroll = max_ratatui.saturating_sub(scroll.offset);
+        // scroll.offset is "visual lines from the bottom": 0 = bottom, max = top.
+        // Convert to ratatui scroll (visual lines from the top).
+        let max_visual = scroll.total_visual_lines.saturating_sub(scroll.visible_height);
+        let ratatui_scroll = max_visual.saturating_sub(scroll.offset);
         let paragraph = Paragraph::new(scroll.lines.clone())
             .style(Style::default().fg(theme.logstream_text))
             .block(block)
@@ -515,17 +516,21 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
     // -- Branch B: pending_scroll -- create snapshot and apply pending action.
     if let Some(pending_action) = app.pending_scroll.take() {
         let total_lines = lines.len();
+        let vis_total = crate::tui::app::total_visual_lines(&lines, inner_width);
         let mut scroll = ScrollMode {
             lines: lines.clone(),
             offset: 0,
             total_lines,
+            total_visual_lines: vis_total,
             visible_height: inner_height,
+            inner_width,
         };
 
         // Set initial offset to bottom (offset 0 = bottom), then apply action.
+        // Offsets are in visual (wrapped) lines.
+        let max_offset = vis_total.saturating_sub(inner_height);
         match pending_action {
             crate::tui::app::PendingScroll::Up(n) => {
-                let max_offset = total_lines.saturating_sub(inner_height);
                 scroll.offset = n.min(max_offset);
             }
             crate::tui::app::PendingScroll::Down(_) => {
@@ -533,11 +538,10 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
                 scroll.offset = 0;
             }
             crate::tui::app::PendingScroll::ToTop => {
-                scroll.offset = total_lines.saturating_sub(inner_height);
+                scroll.offset = max_offset;
             }
             crate::tui::app::PendingScroll::HalfPageUp => {
                 let half = inner_height / 2;
-                let max_offset = total_lines.saturating_sub(inner_height);
                 scroll.offset = half.min(max_offset);
             }
             crate::tui::app::PendingScroll::HalfPageDown => {
@@ -556,10 +560,10 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
             app.scroll_to_current_search_match();
         }
 
-        // Convert scroll.offset (lines from bottom) to ratatui scroll (lines from top).
+        // Convert scroll.offset (visual lines from bottom) to ratatui scroll (visual lines from top).
         let scroll_ref = app.scroll_mode.as_ref().unwrap();
-        let max_ratatui = scroll_ref.total_lines.saturating_sub(scroll_ref.visible_height);
-        let ratatui_scroll = max_ratatui.saturating_sub(scroll_ref.offset);
+        let max_visual = scroll_ref.total_visual_lines.saturating_sub(scroll_ref.visible_height);
+        let ratatui_scroll = max_visual.saturating_sub(scroll_ref.offset);
         let paragraph = Paragraph::new(scroll_ref.lines.clone())
             .style(Style::default().fg(logstream_text_color))
             .block(block)
@@ -571,8 +575,8 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // -- Branch C: normal auto-scroll to bottom. --
-    let total_lines = lines.len() as u16;
-    let scroll_offset = total_lines.saturating_sub(inner_height as u16);
+    let vis_total = crate::tui::app::total_visual_lines(&lines, inner_width) as u16;
+    let scroll_offset = vis_total.saturating_sub(inner_height as u16);
 
     let paragraph = Paragraph::new(lines)
         .style(Style::default().fg(theme.logstream_text))

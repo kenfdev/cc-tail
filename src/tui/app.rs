@@ -59,16 +59,61 @@ pub enum PendingScroll {
 ///
 /// When active, the log stream is frozen at a snapshot of rendered lines
 /// and the user can scroll through them instead of seeing live updates.
+///
+/// **Coordinate system:** `offset` and `total_visual_lines` are measured in
+/// *visual* (wrapped) lines — i.e. the number of rows ratatui actually
+/// renders after word-wrapping. This keeps the offset consistent with what
+/// the user sees on screen.
 #[derive(Debug, Clone)]
 pub struct ScrollMode {
     /// The snapshot of rendered lines (set by the render phase).
     pub lines: Vec<ratatui::text::Line<'static>>,
-    /// Current scroll offset (0 = showing the bottom of the log).
+    /// Current scroll offset in visual lines (0 = showing the bottom).
     pub offset: usize,
-    /// Total number of lines in the snapshot.
+    /// Total number of *logical* lines in the snapshot (kept for diagnostics).
+    #[allow(dead_code)]
     pub total_lines: usize,
+    /// Total number of *visual* (wrapped) lines in the snapshot.
+    pub total_visual_lines: usize,
     /// Number of visible lines in the log stream area.
     pub visible_height: usize,
+    /// Inner width available for text (used for visual-line calculations).
+    pub inner_width: u16,
+}
+
+// ---------------------------------------------------------------------------
+// Visual-line helpers (wrap-aware coordinate helpers)
+// ---------------------------------------------------------------------------
+
+/// How many visual (screen) rows a single logical line occupies after
+/// word-wrapping to `width` columns. Returns at least 1.
+pub fn wrapped_line_height(line: &ratatui::text::Line<'_>, width: u16) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let w = line.width();
+    if w == 0 {
+        return 1;
+    }
+    w.div_ceil(width as usize)
+}
+
+/// Total visual (wrapped) lines for a slice of logical lines.
+pub fn total_visual_lines(lines: &[ratatui::text::Line<'_>], width: u16) -> usize {
+    lines
+        .iter()
+        .map(|l| wrapped_line_height(l, width))
+        .sum()
+}
+
+/// Visual-line offset of logical line `idx` (i.e. the sum of wrapped
+/// heights of all lines *before* `idx`).
+pub fn visual_line_position(lines: &[ratatui::text::Line<'_>], idx: usize, width: u16) -> usize {
+    let end = idx.min(lines.len());
+    lines[..end]
+        .iter()
+        .map(|l| wrapped_line_height(l, width))
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +492,7 @@ impl App {
     /// - `ToTop`: jump to the top (max offset).
     pub fn apply_scroll(&mut self, action: PendingScroll) {
         if let Some(ref mut sm) = self.scroll_mode {
-            let max_offset = sm.total_lines.saturating_sub(sm.visible_height);
+            let max_offset = sm.total_visual_lines.saturating_sub(sm.visible_height);
             match action {
                 PendingScroll::Up(n) => {
                     sm.offset = sm.offset.saturating_add(n).min(max_offset);
@@ -845,8 +890,8 @@ impl App {
 
     /// Scroll the view so the current search match is visible.
     ///
-    /// Adjusts the scroll offset so the line containing the current match
-    /// is within the visible viewport.
+    /// Converts the target logical line index to a visual (wrapped) line
+    /// position and adjusts the scroll offset to centre it in the viewport.
     pub fn scroll_to_current_search_match(&mut self) {
         let target_line = match self.search_state.current_match_line() {
             Some(line) => line,
@@ -854,17 +899,16 @@ impl App {
         };
 
         if let Some(ref mut sm) = self.scroll_mode {
-            let max_offset = sm.total_lines.saturating_sub(sm.visible_height);
-            // Convert target_line to our offset system (0 = bottom).
-            // ratatui_scroll = max_offset - offset, so target_line = max_offset - offset
-            // => offset = max_offset - target_line
-            // But we want the target line to be visible, so we center it.
+            let max_offset = sm.total_visual_lines.saturating_sub(sm.visible_height);
             let half_visible = sm.visible_height / 2;
 
-            // The ratatui scroll offset for the top of the viewport
-            // should be around target_line - half_visible.
-            let desired_ratatui_top = target_line.saturating_sub(half_visible);
-            // Convert to our offset: offset = max_offset - desired_ratatui_top
+            // Convert logical line index → visual line position.
+            let target_visual = visual_line_position(&sm.lines, target_line, sm.inner_width);
+
+            // Centre the target visual line in the viewport.
+            let desired_ratatui_top = target_visual.saturating_sub(half_visible);
+            // Convert to our offset system (0 = bottom):
+            //   ratatui_scroll = max_offset - offset
             let new_offset = max_offset.saturating_sub(desired_ratatui_top);
             sm.offset = new_offset.min(max_offset);
         }
@@ -1708,6 +1752,9 @@ mod tests {
     // -- Scroll mode tests ----------------------------------------------------
 
     /// Helper: create an App with scroll_mode pre-set for testing.
+    ///
+    /// Uses `total_lines` as `total_visual_lines` (assumes no wrapping)
+    /// and a default inner_width of 80.
     fn app_with_scroll_mode(offset: usize, total_lines: usize, visible_height: usize) -> App {
         let mut app = App::new(test_config());
         app.focus = Focus::LogStream;
@@ -1715,7 +1762,9 @@ mod tests {
             lines: Vec::new(),
             offset,
             total_lines,
+            total_visual_lines: total_lines,
             visible_height,
+            inner_width: 80,
         });
         app
     }
@@ -2323,7 +2372,23 @@ mod tests {
 
     #[test]
     fn test_scroll_to_search_match() {
-        let mut app = app_with_scroll_mode(0, 100, 20);
+        use ratatui::text::Line;
+
+        // Create 100 short lines that don't wrap at width 80.
+        let lines: Vec<Line<'static>> = (0..100)
+            .map(|i| Line::from(format!("line {}", i)))
+            .collect();
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.scroll_mode = Some(ScrollMode {
+            total_visual_lines: 100,
+            total_lines: 100,
+            visible_height: 20,
+            inner_width: 80,
+            offset: 0,
+            lines,
+        });
         app.search_state.mode = crate::search::SearchMode::Active;
         app.search_state.matches = vec![
             crate::search::SearchMatch { line_index: 50, byte_start: 0, byte_len: 4 },
@@ -2335,6 +2400,83 @@ mod tests {
         // The offset should be adjusted so line 50 is visible
         let offset = app.scroll_mode.as_ref().unwrap().offset;
         assert!(offset > 0, "offset should have changed from 0");
+    }
+
+    #[test]
+    fn test_visual_line_helpers() {
+        use ratatui::text::{Line, Span};
+
+        // Short lines (width < 80) → 1 visual line each.
+        let lines: Vec<Line> = vec![
+            Line::from("short"),
+            Line::from("also short"),
+        ];
+        assert_eq!(wrapped_line_height(&lines[0], 80), 1);
+        assert_eq!(total_visual_lines(&lines, 80), 2);
+        assert_eq!(visual_line_position(&lines, 0, 80), 0);
+        assert_eq!(visual_line_position(&lines, 1, 80), 1);
+
+        // A 160-char line at width 80 → wraps to 2 visual lines.
+        let long = "x".repeat(160);
+        let lines_with_wrap: Vec<Line> = vec![
+            Line::from(Span::raw(long)),
+            Line::from("after"),
+        ];
+        assert_eq!(wrapped_line_height(&lines_with_wrap[0], 80), 2);
+        assert_eq!(total_visual_lines(&lines_with_wrap, 80), 3);
+        // "after" starts at visual line 2.
+        assert_eq!(visual_line_position(&lines_with_wrap, 1, 80), 2);
+    }
+
+    #[test]
+    fn test_scroll_to_search_match_with_wrapping() {
+        use ratatui::text::{Line, Span};
+
+        // 10 lines: first 5 are 160-chars wide (wrap to 2 visual lines each at width 80).
+        // Lines 5..9 are short (1 visual line each).
+        // Total visual lines = 5*2 + 5*1 = 15.
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for _ in 0..5 {
+            lines.push(Line::from(Span::raw("x".repeat(160))));
+        }
+        for i in 5..10 {
+            lines.push(Line::from(format!("short line {}", i)));
+        }
+
+        let vis_total = total_visual_lines(&lines, 80);
+        assert_eq!(vis_total, 15);
+
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.scroll_mode = Some(ScrollMode {
+            total_visual_lines: vis_total,
+            total_lines: 10,
+            visible_height: 10,
+            inner_width: 80,
+            offset: 0,
+            lines,
+        });
+
+        // Match on logical line 7 → visual line position = 5*2 + 2*1 = 12.
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.matches = vec![
+            crate::search::SearchMatch { line_index: 7, byte_start: 0, byte_len: 4 },
+        ];
+        app.search_state.current_match_index = Some(0);
+
+        app.scroll_to_current_search_match();
+
+        let sm = app.scroll_mode.as_ref().unwrap();
+        let max_visual = sm.total_visual_lines.saturating_sub(sm.visible_height); // 15 - 10 = 5
+        let ratatui_scroll = max_visual.saturating_sub(sm.offset);
+        // Target visual line is 12, viewport height 10.
+        // The target should be within [ratatui_scroll, ratatui_scroll + 10).
+        assert!(
+            ratatui_scroll <= 12 && 12 < ratatui_scroll + 10,
+            "target visual line 12 not in viewport [{}, {})",
+            ratatui_scroll,
+            ratatui_scroll + 10
+        );
     }
 
     // -- Full history load tests -------------------------------------------
