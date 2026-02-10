@@ -15,10 +15,12 @@ use ratatui::Frame;
 
 use crate::content_render::{has_renderable_content, render_content_blocks, RenderedLine};
 use crate::log_entry::{EntryType, LogEntry};
+use crate::search::{find_matches, SearchMatch};
 use crate::session::SessionStatus;
+use crate::session_stats::compute_session_stats;
 use crate::theme::ThemeColors;
 use crate::tui::app::{App, Focus, ScrollMode};
-use crate::tui::filter_overlay::FilterOverlayFocus;
+
 
 // ---------------------------------------------------------------------------
 // Main draw function
@@ -60,11 +62,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_logstream(frame, app, main_area);
     }
 
-    draw_status_bar(frame, app, status_area);
+    // Show search input bar when in search input mode, otherwise status bar.
+    if app.search_state.is_input() {
+        draw_search_input_bar(frame, app, status_area);
+    } else {
+        draw_status_bar(frame, app, status_area);
+    }
 
-    // Draw filter overlay on top of everything when visible.
-    if app.filter_overlay.visible {
-        draw_filter_overlay(frame, app, size);
+    // Draw filter menu on top of everything when visible.
+    if app.filter_menu.visible {
+        draw_filter_menu(frame, app, size);
     }
 
     // Draw help overlay on top of everything when visible.
@@ -129,10 +136,10 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // -- Session header row --
 
-        // Active marker: "● " for active sessions, "  " for inactive.
+        // Active marker: "● " (or "* " in ASCII mode) for active sessions, "  " for inactive.
         let marker = match session.status() {
             SessionStatus::Active => Span::styled(
-                "\u{25cf} ",
+                format!("{} ", app.symbols.active_marker),
                 Style::default()
                     .fg(theme.sidebar_active_marker)
                     .add_modifier(Modifier::BOLD),
@@ -179,8 +186,8 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
                 .or(agent.agent_id.as_deref())
                 .unwrap_or("unknown");
 
-            // Indent: "  \u{2514} slug-name" (2 spaces + corner + space + slug)
-            let prefix = "  \u{2514} ";
+            // Indent: "  └ slug-name" (2 spaces + corner + space + slug)
+            let prefix = format!("  {} ", app.symbols.tree_connector);
             let available = max_width.saturating_sub(prefix.len());
             let truncated_slug = if slug_display.len() > available {
                 format!("{}...", &slug_display[..available.saturating_sub(3)])
@@ -361,7 +368,7 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
                 ts_span,
                 Span::raw(" "),
                 Span::styled(
-                    format!("\u{25b6} {}", description),
+                    format!("{} {}", app.symbols.progress_indicator, description),
                     Style::default().fg(theme.logstream_progress),
                 ),
             ];
@@ -404,7 +411,17 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             lines.push(Line::from(spans));
         } else {
-            for (i, rendered_line) in rendered.iter().enumerate() {
+            // Track which rendered-line index produced the first visible line
+            // so we know when to attach the agent prefix.
+            let mut first_visible = true;
+            for rendered_line in rendered.iter() {
+                // Skip tool call lines when tool call hiding is active.
+                if !filter_state.is_tool_line_visible()
+                    && matches!(rendered_line, RenderedLine::ToolUse(_))
+                {
+                    continue;
+                }
+
                 let (indicator, color, text) = match rendered_line {
                     RenderedLine::Text(t) => {
                         let (ind, col) = role_indicator(entry_role, theme);
@@ -420,11 +437,12 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(String::from(indicator), Style::default().fg(color)),
                 ];
 
-                // Only show agent prefix on the first line of each entry.
-                if i == 0 {
+                // Only show agent prefix on the first visible line of each entry.
+                if first_visible {
                     if let Some(ref ps) = prefix_span {
                         spans.push(ps.clone());
                     }
+                    first_visible = false;
                 }
 
                 spans.push(Span::raw(" "));
@@ -433,6 +451,65 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(Line::from(spans));
             }
         }
+    }
+
+    // -- Search highlights: compute matches and apply highlights to lines. --
+    if app.search_state.is_active() && !app.search_state.query.is_empty() {
+        let query = &app.search_state.query;
+        let mut all_matches: Vec<SearchMatch> = Vec::new();
+
+        // Compute matches for each line.
+        for (line_idx, line) in lines.iter().enumerate() {
+            let line_text = line_to_text(line);
+            let matches = find_matches(&line_text, query);
+            for (byte_start, byte_len) in matches {
+                all_matches.push(SearchMatch {
+                    line_index: line_idx,
+                    byte_start,
+                    byte_len,
+                });
+            }
+        }
+
+        // Update the search state with computed matches.
+        app.search_state.matches = all_matches;
+        // If current_match_index is out of bounds, reset it.
+        if let Some(idx) = app.search_state.current_match_index {
+            if idx >= app.search_state.matches.len() {
+                app.search_state.current_match_index = if app.search_state.matches.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
+            }
+        }
+        // Auto-select first match if no match is currently selected.
+        if app.search_state.current_match_index.is_none() && !app.search_state.matches.is_empty() {
+            app.search_state.current_match_index = Some(0);
+        }
+
+        // Apply highlights to lines.
+        let search_matches = &app.search_state.matches;
+        let current_match = app.search_state.current_match_index;
+        let match_style = Style::default()
+            .fg(theme.search_match_fg)
+            .bg(theme.search_match_bg);
+        let current_style = Style::default()
+            .fg(theme.search_current_fg)
+            .bg(theme.search_current_bg)
+            .add_modifier(Modifier::BOLD);
+
+        lines = apply_search_highlights(
+            lines,
+            search_matches,
+            current_match,
+            match_style,
+            current_style,
+        );
+    } else if !app.search_state.is_active() {
+        // Clear stale matches when search is not active.
+        app.search_state.matches.clear();
+        app.search_state.current_match_index = None;
     }
 
     // -- Branch B: pending_scroll -- create snapshot and apply pending action.
@@ -469,16 +546,26 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
 
+        app.scroll_mode = Some(scroll);
+
+        // Copy theme color before mutable borrow in scroll_to_current_search_match.
+        let logstream_text_color = app.theme_colors.logstream_text;
+
+        // If search is active with a current match, scroll to it.
+        if app.search_state.is_active() && app.search_state.current_match_index.is_some() {
+            app.scroll_to_current_search_match();
+        }
+
         // Convert scroll.offset (lines from bottom) to ratatui scroll (lines from top).
-        let max_ratatui = total_lines.saturating_sub(inner_height);
-        let ratatui_scroll = max_ratatui.saturating_sub(scroll.offset);
-        let paragraph = Paragraph::new(scroll.lines.clone())
-            .style(Style::default().fg(theme.logstream_text))
+        let scroll_ref = app.scroll_mode.as_ref().unwrap();
+        let max_ratatui = scroll_ref.total_lines.saturating_sub(scroll_ref.visible_height);
+        let ratatui_scroll = max_ratatui.saturating_sub(scroll_ref.offset);
+        let paragraph = Paragraph::new(scroll_ref.lines.clone())
+            .style(Style::default().fg(logstream_text_color))
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((ratatui_scroll as u16, 0));
 
-        app.scroll_mode = Some(scroll);
         frame.render_widget(paragraph, area);
         return;
     }
@@ -611,23 +698,227 @@ fn extract_progress_description(entry: &LogEntry) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Search helpers
+// ---------------------------------------------------------------------------
+
+/// Concatenate the text content of all spans in a line into a single string.
+///
+/// This is used to compute search matches against the rendered line text.
+fn line_to_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+/// Apply search highlights to a list of lines.
+///
+/// For each search match, splits the affected span(s) and injects highlight
+/// styling. The `current_match` index gets a distinct style from other matches.
+///
+/// This is a post-process approach: build lines normally, then inject highlights.
+fn apply_search_highlights(
+    lines: Vec<Line<'static>>,
+    matches: &[SearchMatch],
+    current_match: Option<usize>,
+    match_style: Style,
+    current_style: Style,
+) -> Vec<Line<'static>> {
+    if matches.is_empty() {
+        return lines;
+    }
+
+    // Group matches by line index for efficient processing.
+    let mut matches_by_line: std::collections::HashMap<usize, Vec<(usize, &SearchMatch)>> =
+        std::collections::HashMap::new();
+    for (global_idx, m) in matches.iter().enumerate() {
+        matches_by_line
+            .entry(m.line_index)
+            .or_default()
+            .push((global_idx, m));
+    }
+
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(line_idx, line)| {
+            if let Some(line_matches) = matches_by_line.get(&line_idx) {
+                highlight_line(line, line_matches, current_match, match_style, current_style)
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// Apply search highlights to a single line.
+///
+/// Walks through the spans, tracking cumulative byte position, and splits
+/// spans at match boundaries to inject highlight styles.
+fn highlight_line(
+    line: Line<'static>,
+    line_matches: &[(usize, &SearchMatch)],
+    current_match: Option<usize>,
+    match_style: Style,
+    current_style: Style,
+) -> Line<'static> {
+    // Build a sorted list of highlight regions as (byte_start, byte_end, is_current).
+    let mut regions: Vec<(usize, usize, bool)> = line_matches
+        .iter()
+        .map(|(global_idx, m)| {
+            let is_current = current_match == Some(*global_idx);
+            (m.byte_start, m.byte_start + m.byte_len, is_current)
+        })
+        .collect();
+    regions.sort_by_key(|r| r.0);
+
+    let mut new_spans: Vec<Span<'static>> = Vec::new();
+    let mut byte_offset: usize = 0;
+    let mut region_idx = 0;
+
+    for span in line.spans {
+        let span_text: &str = span.content.as_ref();
+        let span_start = byte_offset;
+        let span_end = byte_offset + span_text.len();
+        let original_style = span.style;
+
+        let mut pos = span_start;
+
+        while pos < span_end && region_idx < regions.len() {
+            let (r_start, r_end, is_current) = regions[region_idx];
+
+            if r_start >= span_end {
+                // No more matches in this span.
+                break;
+            }
+
+            if r_end <= pos {
+                // This match is before our current position; skip it.
+                region_idx += 1;
+                continue;
+            }
+
+            // Emit the portion before the match (if any).
+            if pos < r_start && r_start < span_end {
+                let before_start = pos - span_start;
+                let before_end = r_start - span_start;
+                new_spans.push(Span::styled(
+                    span_text[before_start..before_end].to_string(),
+                    original_style,
+                ));
+                pos = r_start;
+            }
+
+            // Emit the highlighted portion.
+            let hl_start = pos.max(r_start) - span_start;
+            let hl_end = r_end.min(span_end) - span_start;
+            if hl_start < hl_end {
+                let style = if is_current {
+                    current_style
+                } else {
+                    match_style
+                };
+                new_spans.push(Span::styled(
+                    span_text[hl_start..hl_end].to_string(),
+                    style,
+                ));
+            }
+
+            pos = r_end.min(span_end);
+
+            // If we've consumed the entire match region, advance to the next.
+            if pos >= r_end {
+                region_idx += 1;
+            }
+        }
+
+        // Emit the remainder of the span after all matches.
+        if pos < span_end {
+            let remainder_start = pos - span_start;
+            new_spans.push(Span::styled(
+                span_text[remainder_start..].to_string(),
+                original_style,
+            ));
+        }
+
+        byte_offset = span_end;
+    }
+
+    Line::from(new_spans)
+}
+
+/// Draw the search input bar at the bottom of the screen.
+///
+/// Replaces the status bar when search input mode is active.
+/// Shows `/ ` prompt followed by the current input buffer and a cursor.
+fn draw_search_input_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme_colors;
+
+    let mut spans: Vec<Span> = vec![
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(theme.search_prompt)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.search_state.input_buffer.clone(),
+            Style::default().fg(theme.search_input_fg),
+        ),
+        // Cursor indicator.
+        Span::styled(
+            app.symbols.search_cursor.to_string(),
+            Style::default()
+                .fg(theme.search_input_fg)
+                .add_modifier(Modifier::SLOW_BLINK),
+        ),
+    ];
+
+    // Right-aligned hint.
+    let hint = " Enter:search  Esc:cancel";
+    let content_len = 1 + app.search_state.input_buffer.len() + 1; // "/" + input + cursor
+    let remaining = (area.width as usize).saturating_sub(content_len + hint.len());
+    if remaining > 0 {
+        spans.push(Span::raw(" ".repeat(remaining)));
+        spans.push(Span::styled(
+            hint.to_string(),
+            Style::default()
+                .fg(theme.status_bar_fg)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line).style(
+        Style::default()
+            .bg(theme.status_bar_bg)
+            .fg(theme.status_bar_fg),
+    );
+
+    frame.render_widget(paragraph, area);
+}
+
+// ---------------------------------------------------------------------------
 // Filter overlay
 // ---------------------------------------------------------------------------
 
 /// Draw the filter overlay modal on top of the main UI.
 ///
-/// Renders a centered popup with:
-/// - A regex pattern input field (with red border for invalid patterns)
-/// - Role toggles (if any roles are known)
-/// - Agent toggles (if any agents are known)
-/// - Footer with key hints
-fn draw_filter_overlay(frame: &mut Frame, app: &App, area: Rect) {
+/// Draw the filter menu overlay.
+///
+/// Renders a centered popup showing the list of filter menu items with
+/// the currently selected item highlighted. Items include a tool call
+/// toggle (checkbox) and agent options (radio buttons).
+fn draw_filter_menu(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme_colors;
-    let overlay = &app.filter_overlay;
+    let menu = &app.filter_menu;
 
-    // Compute overlay dimensions: centered, at most 60 cols x 20 rows.
-    let overlay_width = area.width.clamp(20, 60);
-    let overlay_height = area.height.clamp(6, 20);
+    if menu.items.is_empty() {
+        return;
+    }
+
+    // Compute overlay dimensions: centered, compact.
+    // Height: 2 (borders) + item count + 2 (title row + footer)
+    let content_rows = menu.items.len() + 2; // items + blank separator + footer hints
+    let overlay_height = (content_rows as u16 + 2).clamp(6, area.height); // +2 for borders
+    let overlay_width = area.width.clamp(20, 40);
 
     let x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
     let y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
@@ -636,17 +927,10 @@ fn draw_filter_overlay(frame: &mut Frame, app: &App, area: Rect) {
     // Clear the area behind the overlay.
     frame.render_widget(Clear, overlay_area);
 
-    // Outer block
-    let border_color = if !overlay.pattern_valid {
-        theme.filter_invalid
-    } else {
-        theme.filter_valid_border
-    };
-
     let block = Block::default()
-        .title(" Filter (Enter=apply, Esc=cancel) ")
+        .title(" Filter ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_style(Style::default().fg(theme.filter_valid_border));
 
     let inner = block.inner(overlay_area);
     frame.render_widget(block, overlay_area);
@@ -655,155 +939,56 @@ fn draw_filter_overlay(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Split inner area into sections.
     let mut lines: Vec<Line> = Vec::new();
 
-    // -- Pattern input section --
-    let focused_on_pattern = overlay.focus == FilterOverlayFocus::PatternInput;
-    let pattern_label_style = if focused_on_pattern {
-        Style::default()
-            .fg(theme.filter_focused_label)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.filter_unfocused_label)
-    };
+    // Render each menu item.
+    for idx in 0..menu.items.len() {
+        let label = menu.item_label(idx);
+        let is_selected = idx == menu.selected;
 
-    let cursor_indicator = if focused_on_pattern { "|" } else { "" };
+        let style = if is_selected {
+            Style::default()
+                .fg(theme.filter_selected_fg)
+                .bg(theme.filter_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.filter_unselected)
+        };
 
-    // Build the pattern display with cursor
-    let pattern_display = if focused_on_pattern {
-        let before = &overlay.pattern_input[..overlay.cursor_pos];
-        let after = &overlay.pattern_input[overlay.cursor_pos..];
-        format!("{}{}{}", before, cursor_indicator, after)
-    } else {
-        overlay.pattern_input.clone()
-    };
-
-    let pattern_style = if !overlay.pattern_valid {
-        Style::default().fg(theme.filter_invalid)
-    } else {
-        Style::default().fg(theme.filter_valid_text)
-    };
-
-    lines.push(Line::from(vec![
-        Span::styled(" Pattern: ", pattern_label_style),
-        Span::styled(pattern_display, pattern_style),
-    ]));
-
-    if !overlay.pattern_valid {
-        lines.push(Line::from(vec![Span::styled(
-            "          (invalid regex)",
-            Style::default().fg(theme.filter_invalid),
-        )]));
+        lines.push(Line::from(Span::styled(format!("  {} ", label), style)));
     }
 
+    // Footer hints.
     lines.push(Line::from(""));
-
-    // -- Role toggles section --
-    if !overlay.role_options.is_empty() {
-        let focused_on_roles = overlay.focus == FilterOverlayFocus::RoleToggles;
-        let role_label_style = if focused_on_roles {
-            Style::default()
-                .fg(theme.filter_focused_label)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.filter_unfocused_label)
-        };
-        lines.push(Line::from(Span::styled(
-            " Roles (Space=toggle):",
-            role_label_style,
-        )));
-
-        for (i, opt) in overlay.role_options.iter().enumerate() {
-            let checkbox = if opt.enabled { "[x]" } else { "[ ]" };
-            let is_selected = focused_on_roles && i == overlay.role_selected;
-            let style = if is_selected {
-                Style::default()
-                    .fg(theme.filter_selected_fg)
-                    .bg(theme.filter_selected_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.filter_unselected)
-            };
-            lines.push(Line::from(Span::styled(
-                format!("   {} {}", checkbox, opt.name),
-                style,
-            )));
-        }
-
-        lines.push(Line::from(""));
-    }
-
-    // -- Agent toggles section --
-    if !overlay.agent_options.is_empty() {
-        let focused_on_agents = overlay.focus == FilterOverlayFocus::AgentToggles;
-        let agent_label_style = if focused_on_agents {
-            Style::default()
-                .fg(theme.filter_focused_label)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.filter_unfocused_label)
-        };
-        lines.push(Line::from(Span::styled(
-            " Agents (Space=toggle, m=main):",
-            agent_label_style,
-        )));
-
-        // Main agent toggle
-        let main_checkbox = if overlay.include_main { "[x]" } else { "[ ]" };
-        let main_style = if focused_on_agents {
-            Style::default().fg(theme.filter_main_focused)
-        } else {
-            Style::default().fg(theme.filter_main_unfocused)
-        };
-        lines.push(Line::from(Span::styled(
-            format!("   {} main", main_checkbox),
-            main_style,
-        )));
-
-        for (i, opt) in overlay.agent_options.iter().enumerate() {
-            let checkbox = if opt.enabled { "[x]" } else { "[ ]" };
-            let is_selected = focused_on_agents && i == overlay.agent_selected;
-            let style = if is_selected {
-                Style::default()
-                    .fg(theme.filter_selected_fg)
-                    .bg(theme.filter_selected_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.filter_unselected)
-            };
-            lines.push(Line::from(Span::styled(
-                format!("   {} {}", checkbox, opt.display_name),
-                style,
-            )));
-        }
-
-        lines.push(Line::from(""));
-    }
-
-    // -- Footer hints --
     lines.push(Line::from(vec![
         Span::styled(
-            " Tab",
+            " Enter",
             Style::default()
                 .fg(theme.filter_shortcut_key)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(":next section "),
+        Span::raw("/"),
         Span::styled(
-            "Enter",
+            "Space",
             Style::default()
                 .fg(theme.filter_shortcut_key)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(":apply "),
+        Span::raw(":select "),
         Span::styled(
             "Esc",
             Style::default()
                 .fg(theme.filter_shortcut_key)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(":cancel"),
+        Span::raw("/"),
+        Span::styled(
+            "f",
+            Style::default()
+                .fg(theme.filter_shortcut_key)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(":close"),
     ]));
 
     let paragraph = Paragraph::new(lines)
@@ -833,30 +1018,61 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Shortcut entries: (key_text, description)
-    let shortcuts: Vec<(&str, &str)> = vec![
-        ("q", "Quit"),
-        ("Ctrl+C", "Quit (force)"),
-        ("?", "Show this help"),
-        ("Tab", "Toggle focus between panels"),
-        ("b", "Toggle sidebar"),
-        ("/", "Open filter overlay"),
-        ("j / Down", "Navigate / scroll (focus-dependent)"),
-        ("k / Up", "Navigate / scroll (focus-dependent)"),
-        ("Enter", "Confirm session selection"),
-        ("u / d", "Half-page scroll (log stream)"),
-        ("PgUp / PgDn", "Page scroll (log stream)"),
-        ("g / Home", "Scroll to top (log stream)"),
-        ("G / End / Esc", "Exit scroll mode"),
+    // Compute session stats from the ring buffer.
+    let stats = compute_session_stats(&app.ring_buffer);
+
+    // ----- Section 1: Symbol & Color Legend ---------------------------------
+    // (symbol, color, description)
+    let legend: Vec<(&str, Color, &str)> = vec![
+        (">", theme.role_user, "User message"),
+        ("<", theme.role_assistant, "Assistant message"),
+        ("~", theme.role_tool_use, "Tool call"),
+        ("?", theme.role_unknown, "Unknown role"),
+        (app.symbols.progress_indicator, theme.logstream_progress, "Progress indicator"),
     ];
 
-    // Compute overlay dimensions.
-    // Width: enough for the widest line, clamped to terminal width.
-    let content_width: u16 = 52; // widest line: "  PgUp / PgDn  Page scroll (log stream)" ~42 + padding
-    let overlay_width = (content_width + 4).min(area.width); // +4 for borders + padding, clamped to area
-                                                             // Height: title(1) + blank(1) + shortcuts(N) + blank(1) + footer(1) + borders(2)
-    let content_lines = shortcuts.len() as u16 + 4; // title + blank + shortcuts + blank + footer
-    let overlay_height = (content_lines + 2).min(area.height); // +2 for borders, clamped to area
+    // ----- Section 2: Complete Keybinding Reference -------------------------
+    let keybindings: Vec<(&str, &str)> = vec![
+        ("?", "Toggle this help screen"),
+        ("Esc", "Close help / exit scroll/search"),
+        ("q", "Quit"),
+        ("Ctrl+C", "Quit (force)"),
+        ("Tab", "Toggle focus between panels"),
+        ("b", "Toggle sidebar"),
+        ("Enter", "Confirm session selection"),
+        ("f", "Open filter menu"),
+        ("/", "Search (type query, Enter to confirm)"),
+        ("n / N", "Next / previous search match"),
+        ("L", "Load full session history"),
+        ("j / Down", "Navigate / scroll down"),
+        ("k / Up", "Navigate / scroll up"),
+        ("u / d", "Half-page up / down"),
+        ("PgUp/PgDn", "Page up / down"),
+        ("g / Home", "Scroll to top"),
+        ("G / End", "Scroll to bottom (exit scroll)"),
+    ];
+
+    // ----- Compute overlay dimensions ---------------------------------------
+    // Target: ~70 wide, ~45 tall. Degrade gracefully on small terminals.
+    let overlay_width = 70u16.min(area.width.saturating_sub(2));
+    // Estimate content height:
+    //   title(1) + blank(1) + legend_header(1) + legend rows(5) + note(1) + note(1)
+    //   + blank(1) + keybind_header(1) + keybind rows(17)
+    //   + blank(1) + stats_header(1) + stats rows(~8)
+    //   + blank(1) + footer(1) + borders(2)
+    // Roughly: 6 + 2 + 18 + 2 + 10 + 4 = ~42
+    let stats_lines_count = 4
+        + stats.tool_call_breakdown.len().min(5)
+        + if stats.subagent_count > 0 { 1 } else { 0 };
+    let content_height = 3   // title + blank + legend header
+        + legend.len()       // legend rows
+        + 2                  // agent prefix note + timestamp note
+        + 2                  // blank + keybinds header
+        + keybindings.len()  // keybind rows
+        + 2                  // blank + stats header
+        + stats_lines_count  // stats rows
+        + 2;                 // blank + footer
+    let overlay_height = (content_height as u16 + 2).min(area.height); // +2 for borders
 
     let x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
     let y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
@@ -879,38 +1095,128 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Title
+    let section_style = Style::default()
+        .fg(theme.filter_overlay_fg)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default()
+        .fg(theme.filter_shortcut_key)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.filter_overlay_fg);
+    let dim_style = Style::default()
+        .fg(theme.filter_overlay_fg)
+        .add_modifier(Modifier::DIM);
+
+    // ---- Title
     lines.push(Line::from(Span::styled(
-        " Keyboard Shortcuts",
-        Style::default()
-            .fg(theme.filter_overlay_fg)
-            .add_modifier(Modifier::BOLD),
+        " cc-tail Help",
+        section_style,
     )));
     lines.push(Line::from(""));
 
-    // Shortcut rows
-    for (key, desc) in &shortcuts {
+    // ---- Section 1: Symbol & Color Legend
+    lines.push(Line::from(Span::styled(
+        " Symbol & Color Legend",
+        section_style,
+    )));
+    for (symbol, color, desc) in &legend {
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:12}", key),
-                Style::default()
-                    .fg(theme.filter_shortcut_key)
-                    .add_modifier(Modifier::BOLD),
+                format!("   {} ", symbol),
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                desc.to_string(),
-                Style::default().fg(theme.filter_overlay_fg),
-            ),
+            Span::styled(desc.to_string(), text_style),
         ]));
     }
+    // Agent prefix and timestamp notes
+    lines.push(Line::from(vec![
+        Span::styled("   [cook] ", label_style),
+        Span::styled("Subagent prefix (last word of slug)", text_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("   HH:MM  ", dim_style),
+        Span::styled("Timestamp format", text_style),
+    ]));
+
+    // ---- Section 2: Keybinding Reference
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Keybindings",
+        section_style,
+    )));
+    for (key, desc) in &keybindings {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("   {:12}", key),
+                label_style,
+            ),
+            Span::styled(desc.to_string(), text_style),
+        ]));
+    }
+
+    // ---- Section 3: Session Stats
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Session Stats",
+        section_style,
+    )));
+
+    // Duration
+    let duration_text = stats
+        .duration_display
+        .as_deref()
+        .unwrap_or("--");
+    lines.push(Line::from(vec![
+        Span::styled("   Duration:   ", label_style),
+        Span::styled(duration_text.to_string(), text_style),
+    ]));
+
+    // Message counts
+    lines.push(Line::from(vec![
+        Span::styled("   Messages:   ", label_style),
+        Span::styled(
+            format!(
+                "{} total ({} user, {} assistant)",
+                stats.user_message_count + stats.assistant_message_count,
+                stats.user_message_count,
+                stats.assistant_message_count,
+            ),
+            text_style,
+        ),
+    ]));
+
+    // Tool calls
+    lines.push(Line::from(vec![
+        Span::styled("   Tool calls: ", label_style),
+        Span::styled(format!("{}", stats.tool_call_count), text_style),
+    ]));
+
+    // Tool breakdown (top 5)
+    for (name, count) in stats.tool_call_breakdown.iter().take(5) {
+        lines.push(Line::from(vec![
+            Span::styled("     ", text_style),
+            Span::styled(format!("{}: {}", name, count), dim_style),
+        ]));
+    }
+
+    // Subagents
+    if stats.subagent_count > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   Subagents:  ", label_style),
+            Span::styled(format!("{}", stats.subagent_count), text_style),
+        ]));
+    }
+
+    // Entries loaded
+    lines.push(Line::from(vec![
+        Span::styled("   Entries:    ", label_style),
+        Span::styled(format!("{} loaded", stats.entries_loaded), text_style),
+    ]));
 
     // Footer
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " Press any key to close",
-        Style::default()
-            .fg(theme.filter_overlay_fg)
-            .add_modifier(Modifier::DIM),
+        " Press ? or Esc to close",
+        dim_style,
     )));
 
     let paragraph = Paragraph::new(lines)
@@ -937,7 +1243,7 @@ const SEPARATOR_WIDTH: usize = 3;
 ///
 /// Returns the full shortcuts string like `" q:quit Tab:focus b:sidebar /:filter ?:help"`.
 fn shortcuts_text() -> String {
-    " q:quit Tab:focus b:sidebar /:filter ?:help".to_string()
+    " q:quit Tab:focus b:sidebar f:filter /:search ?:help".to_string()
 }
 
 /// Build the session info segment text.
@@ -1027,37 +1333,12 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
         }
     }
 
-    // -- Priority 2: Active filters --
-    let filter_display = app.active_filters.display();
-    if let Some(ref full_filter) = filter_display {
-        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 }; // leading space if first
-        let available = width.saturating_sub(used + sep_cost);
-
-        if available >= 4 {
-            // Enough room for at least "x..."
-            let truncated = app.active_filters.display_truncated(available);
-            if let Some(filter_text) = truncated {
-                if used > 0 {
-                    spans.push(Span::styled(
-                        SEPARATOR.to_string(),
-                        Style::default().fg(theme.status_separator),
-                    ));
-                    used += SEPARATOR_WIDTH;
-                } else {
-                    spans.push(Span::raw(" ".to_string()));
-                    used += 1;
-                }
-                let fw = filter_text.len();
-                spans.push(Span::styled(
-                    filter_text,
-                    Style::default()
-                        .fg(theme.status_filter)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                used += fw;
-            }
-        } else if available > 0 && full_filter.len() <= available {
-            // Fits without truncation
+    // -- Priority 1.1: Full history loaded badge --
+    if app.full_history_loaded {
+        let full_badge = " FULL ";
+        let fb_width = full_badge.len();
+        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 };
+        if used + sep_cost + fb_width <= width {
             if used > 0 {
                 spans.push(Span::styled(
                     SEPARATOR.to_string(),
@@ -1068,9 +1349,92 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
                 spans.push(Span::raw(" ".to_string()));
                 used += 1;
             }
-            let fw = full_filter.len();
             spans.push(Span::styled(
-                full_filter.clone(),
+                full_badge.to_string(),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            used += fb_width;
+        }
+    }
+
+    // -- Priority 1.2: Full-load confirmation prompt --
+    if app.full_load_confirm_pending {
+        let confirm_text = format!(
+            " Session is {:.1} MB. Load full history? (y/n) ",
+            app.full_load_pending_size_mb
+        );
+        let ct_width = confirm_text.len();
+        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 };
+        if used + sep_cost + ct_width <= width {
+            if used > 0 {
+                spans.push(Span::styled(
+                    SEPARATOR.to_string(),
+                    Style::default().fg(theme.status_separator),
+                ));
+                used += SEPARATOR_WIDTH;
+            } else {
+                spans.push(Span::raw(" ".to_string()));
+                used += 1;
+            }
+            spans.push(Span::styled(
+                confirm_text,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            used += ct_width;
+        }
+    }
+
+    // -- Priority 1.5: Search match counter --
+    if let Some(ref counter_text) = app.search_state.match_counter_display() {
+        let search_display = format!(" /{} {} ", app.search_state.query, counter_text);
+        let sw = search_display.len();
+        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 };
+
+        if used + sep_cost + sw <= width {
+            if used > 0 {
+                spans.push(Span::styled(
+                    SEPARATOR.to_string(),
+                    Style::default().fg(theme.status_separator),
+                ));
+                used += SEPARATOR_WIDTH;
+            } else {
+                spans.push(Span::raw(" ".to_string()));
+                used += 1;
+            }
+            spans.push(Span::styled(
+                search_display,
+                Style::default()
+                    .fg(theme.search_prompt)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            used += sw;
+        }
+    }
+
+    // -- Priority 2: Active filters --
+    let filter_display = app.filter_state.display();
+    if let Some(ref filter_text) = filter_display {
+        let fw = filter_text.len();
+        let sep_cost = if used > 0 { SEPARATOR_WIDTH } else { 1 }; // leading space if first
+
+        if used + sep_cost + fw <= width {
+            if used > 0 {
+                spans.push(Span::styled(
+                    SEPARATOR.to_string(),
+                    Style::default().fg(theme.status_separator),
+                ));
+                used += SEPARATOR_WIDTH;
+            } else {
+                spans.push(Span::raw(" ".to_string()));
+                used += 1;
+            }
+            spans.push(Span::styled(
+                filter_text.clone(),
                 Style::default()
                     .fg(theme.status_filter)
                     .add_modifier(Modifier::BOLD),
@@ -1159,12 +1523,19 @@ fn build_status_bar_line(app: &App, width: usize) -> Line<'static> {
             ));
             spans.push(Span::raw(":sidebar ".to_string()));
             spans.push(Span::styled(
-                "/".to_string(),
+                "f".to_string(),
                 Style::default()
                     .fg(theme.status_shortcut_key)
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(":filter ".to_string()));
+            spans.push(Span::styled(
+                "/".to_string(),
+                Style::default()
+                    .fg(theme.status_shortcut_key)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(":search ".to_string()));
             spans.push(Span::styled(
                 "?".to_string(),
                 Style::default()
@@ -1980,19 +2351,14 @@ mod tests {
 
     #[test]
     fn test_status_bar_with_filters_shown() {
-        use crate::tui::app::ActiveFilters;
-
         let mut app = test_app();
-        app.active_filters = ActiveFilters {
-            pattern: Some("error".to_string()),
-            level: None,
-        };
+        app.filter_state.hide_tool_calls = true;
 
         let line = build_status_bar_line(&app, 120);
         let text = line_text(&line);
 
         assert!(
-            text.contains("filter:error"),
+            text.contains("no tools"),
             "expected filter display in: {}",
             text
         );
@@ -2041,42 +2407,24 @@ mod tests {
     }
 
     #[test]
-    fn test_status_bar_filter_truncated_on_narrow() {
-        use crate::tui::app::ActiveFilters;
-
+    fn test_status_bar_filter_hidden_on_narrow() {
         let mut app = test_app();
-        app.active_filters = ActiveFilters {
-            pattern: Some("very_long_pattern_that_wont_fit".to_string()),
-            level: None,
-        };
+        app.filter_state.hide_tool_calls = true;
+        app.filter_state.selected_agent = Some("very-long-agent-id".to_string());
 
-        // "filter:very_long_pattern_that_wont_fit" = 38 chars
-        // At width 25, filter should be truncated with "..."
-        let line = build_status_bar_line(&app, 25);
-        let text = line_text(&line);
-
-        if text.contains("filter:") {
-            // If filter is shown, it should be truncated
-            assert!(
-                text.contains("..."),
-                "long filter should be truncated with ... in: {}",
-                text
-            );
-        }
-        // Either way, should not panic
+        // "[filter: no tools, agent very-long-agent-id]" = 46 chars
+        // At width 15, filter should not fit and be hidden
+        let line = build_status_bar_line(&app, 15);
+        let _text = line_text(&line);
+        // Should not panic regardless
     }
 
     #[test]
     fn test_status_bar_inactive_badge_always_highest_priority() {
-        use crate::tui::app::ActiveFilters;
-
         let mut app = test_app();
         app.sessions = vec![inactive_session("sess-old")];
         app.active_session_id = Some("sess-old".to_string());
-        app.active_filters = ActiveFilters {
-            pattern: Some("err".to_string()),
-            level: None,
-        };
+        app.filter_state.hide_tool_calls = true;
 
         // Width = 12: enough for badge (10) but not much else
         let line = build_status_bar_line(&app, 12);
@@ -2120,13 +2468,8 @@ mod tests {
 
     #[test]
     fn test_draw_with_filters_no_panic() {
-        use crate::tui::app::ActiveFilters;
-
         let mut app = test_app();
-        app.active_filters = ActiveFilters {
-            pattern: Some("test".to_string()),
-            level: Some("user".to_string()),
-        };
+        app.filter_state.hide_tool_calls = true;
 
         let mut terminal = test_terminal(80, 24);
         terminal
@@ -2136,15 +2479,10 @@ mod tests {
 
     #[test]
     fn test_draw_narrow_terminal_with_all_features_no_panic() {
-        use crate::tui::app::ActiveFilters;
-
         let mut app = test_app();
         app.sessions = vec![inactive_session("sess-old")];
         app.active_session_id = Some("sess-old".to_string());
-        app.active_filters = ActiveFilters {
-            pattern: Some("error".to_string()),
-            level: None,
-        };
+        app.filter_state.hide_tool_calls = true;
 
         // Very narrow terminal
         let mut terminal = test_terminal(15, 3);
@@ -2403,14 +2741,9 @@ mod tests {
 
     #[test]
     fn test_draw_with_status_message_and_filters_no_panic() {
-        use crate::tui::app::ActiveFilters;
-
         let mut app = test_app();
         app.status_message = Some("some status".to_string());
-        app.active_filters = ActiveFilters {
-            pattern: Some("error".to_string()),
-            level: None,
-        };
+        app.filter_state.hide_tool_calls = true;
 
         let mut terminal = test_terminal(80, 24);
         terminal
@@ -2515,5 +2848,172 @@ mod tests {
             "expected ?:help shortcut in: {}",
             text
         );
+    }
+
+    // -- Search rendering tests -----------------------------------------------
+
+    #[test]
+    fn test_draw_with_search_input_mode_no_panic() {
+        let mut app = test_app();
+        app.search_state.start_input();
+        app.search_state.on_char('t');
+        app.search_state.on_char('e');
+
+        let mut terminal = test_terminal(80, 24);
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should not fail with search input mode");
+    }
+
+    #[test]
+    fn test_draw_with_search_active_mode_no_panic() {
+        use crate::log_entry::parse_jsonl_line;
+
+        let mut app = test_app();
+
+        let user_json = r#"{
+            "type": "user",
+            "sessionId": "sess-001",
+            "timestamp": "2025-01-15T10:30:00Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Hello world!"}]}
+        }"#;
+        app.ring_buffer.push(parse_jsonl_line(user_json).unwrap());
+
+        // Activate search
+        app.search_state.start_input();
+        app.search_state.on_char('H');
+        app.search_state.on_char('e');
+        app.search_state.confirm();
+
+        let mut terminal = test_terminal(80, 24);
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should not fail with active search");
+    }
+
+    #[test]
+    fn test_draw_with_search_active_no_entries_no_panic() {
+        let mut app = test_app();
+        app.search_state.start_input();
+        app.search_state.on_char('x');
+        app.search_state.confirm();
+
+        let mut terminal = test_terminal(80, 24);
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should not fail with active search and no entries");
+    }
+
+    #[test]
+    fn test_status_bar_includes_search_shortcut() {
+        let app = test_app();
+        let line = build_status_bar_line(&app, 160);
+        let text = line_text(&line);
+
+        assert!(
+            text.contains("/:search"),
+            "expected /:search shortcut in: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_status_bar_shows_search_counter_when_active() {
+        let mut app = test_app();
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+        app.search_state.matches = vec![
+            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
+            SearchMatch { line_index: 1, byte_start: 0, byte_len: 4 },
+        ];
+        app.search_state.current_match_index = Some(0);
+
+        let line = build_status_bar_line(&app, 120);
+        let text = line_text(&line);
+
+        assert!(
+            text.contains("[1/2]"),
+            "expected search counter [1/2] in: {}",
+            text
+        );
+        assert!(
+            text.contains("/test"),
+            "expected search query /test in: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_line_to_text_concatenates_spans() {
+        let line = Line::from(vec![
+            Span::raw("hello "),
+            Span::raw("world"),
+        ]);
+        assert_eq!(line_to_text(&line), "hello world");
+    }
+
+    #[test]
+    fn test_apply_search_highlights_no_matches_returns_unchanged() {
+        let lines = vec![Line::from("hello world")];
+        let result = apply_search_highlights(
+            lines.clone(),
+            &[],
+            None,
+            Style::default(),
+            Style::default(),
+        );
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_search_highlights_single_match() {
+        let match_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+        let current_style = Style::default().fg(Color::Black).bg(Color::LightYellow);
+
+        let lines = vec![Line::from(Span::raw("hello world"))];
+        let matches = vec![SearchMatch {
+            line_index: 0,
+            byte_start: 6,
+            byte_len: 5,
+        }];
+
+        let result = apply_search_highlights(
+            lines,
+            &matches,
+            Some(0),
+            match_style,
+            current_style,
+        );
+
+        assert_eq!(result.len(), 1);
+        let spans = &result[0].spans;
+        // Should have at least 2 spans: "hello " and highlighted "world"
+        assert!(spans.len() >= 2, "expected at least 2 spans, got {}", spans.len());
+    }
+
+    #[test]
+    fn test_draw_search_input_bar_no_panic() {
+        let mut app = test_app();
+        app.search_state.start_input();
+        app.search_state.on_char('a');
+        app.search_state.on_char('b');
+        app.search_state.on_char('c');
+
+        let mut terminal = test_terminal(80, 24);
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should not fail with search input bar");
+    }
+
+    #[test]
+    fn test_draw_search_input_bar_narrow_terminal_no_panic() {
+        let mut app = test_app();
+        app.search_state.start_input();
+        app.search_state.on_char('x');
+
+        let mut terminal = test_terminal(10, 3);
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw should not fail with search input bar on narrow terminal");
     }
 }

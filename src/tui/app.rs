@@ -10,73 +10,18 @@ use std::time::SystemTime;
 
 use crate::config::AppConfig;
 use crate::filter::FilterState;
-use crate::replay::{replay_session, DEFAULT_REPLAY_COUNT};
+use crate::replay::{load_full_session, replay_session, session_file_size, DEFAULT_REPLAY_COUNT};
 use crate::ring_buffer::RingBuffer;
+use crate::search::SearchState;
 use crate::session::{classify_new_file, Agent, NewFileKind, Session};
+use crate::symbols::Symbols;
 use crate::theme::ThemeColors;
-use crate::tui::filter_overlay::{FilterOverlayState, OverlayAction};
+use crate::tui::filter_overlay::{FilterMenuState, MenuAction};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
-// ---------------------------------------------------------------------------
-// ActiveFilters
-// ---------------------------------------------------------------------------
-
-/// Represents the currently active filters in the TUI.
-///
-/// Forward-compatible interface for Task #13 (Filter System & Overlay).
-/// The status bar reads this to display active filter information.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActiveFilters {
-    /// The current text/regex filter pattern, if any.
-    pub pattern: Option<String>,
-    /// The log level filter (e.g. "user", "assistant"), if any.
-    pub level: Option<String>,
-}
-
-impl ActiveFilters {
-    /// Returns `true` if no filters are currently active.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.pattern.is_none() && self.level.is_none()
-    }
-
-    /// Format the active filters for display in the status bar.
-    ///
-    /// Returns `None` if no filters are active.
-    /// Returns e.g. `"filter:foo"`, `"level:user"`, or `"filter:foo level:user"`.
-    pub fn display(&self) -> Option<String> {
-        let mut parts = Vec::new();
-        if let Some(ref p) = self.pattern {
-            parts.push(format!("filter:{}", p));
-        }
-        if let Some(ref l) = self.level {
-            parts.push(format!("level:{}", l));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" "))
-        }
-    }
-
-    /// Format the active filters for display, truncating to fit within
-    /// `max_width` characters. Appends "..." if truncated.
-    ///
-    /// Returns `None` if no filters are active or `max_width` is too small
-    /// to display anything meaningful (< 4 characters).
-    pub fn display_truncated(&self, max_width: usize) -> Option<String> {
-        let full = self.display()?;
-        if full.len() <= max_width {
-            Some(full)
-        } else if max_width < 4 {
-            // Too narrow to show even "f..."
-            None
-        } else {
-            Some(format!("{}...", &full[..max_width - 3]))
-        }
-    }
-}
+// NOTE: ActiveFilters struct has been removed. Filter display is now handled
+// by FilterState::display() directly.
 
 // ---------------------------------------------------------------------------
 // Focus enum
@@ -146,6 +91,8 @@ pub struct App {
     pub config: AppConfig,
     /// Resolved theme colors derived from `config.theme`.
     pub theme_colors: ThemeColors,
+    /// Symbol set (Unicode or ASCII) derived from `config.ascii`.
+    pub symbols: Symbols,
     /// Byte-budgeted ring buffer holding parsed log entries.
     pub ring_buffer: RingBuffer,
     /// Discovered sessions, sorted by last_modified descending.
@@ -160,12 +107,10 @@ pub struct App {
     /// The session ID that is currently being tailed / active in the log stream.
     /// Set when the user presses Enter on a session.
     pub active_session_id: Option<String>,
-    /// Currently active filters (forward-compatible for Task #13).
-    pub active_filters: ActiveFilters,
     /// The current filter state used for filtering log entries.
     pub filter_state: FilterState,
-    /// State for the filter overlay modal (opened with `/`).
-    pub filter_overlay: FilterOverlayState,
+    /// State for the filter menu overlay (opened with `f`).
+    pub filter_menu: FilterMenuState,
     /// Per-file EOF offsets from the last replay, used to hand off to the
     /// watcher so it starts tailing from where replay left off.
     pub replay_offsets: HashMap<PathBuf, u64>,
@@ -184,6 +129,14 @@ pub struct App {
     pub scroll_mode: Option<ScrollMode>,
     /// A pending scroll action waiting for the render phase to snapshot lines.
     pub pending_scroll: Option<PendingScroll>,
+    /// Search state: mode, query, matches, current match index.
+    pub search_state: SearchState,
+    /// Whether the full session history has been loaded (via `L` key).
+    pub full_history_loaded: bool,
+    /// Whether a full-load size confirmation prompt is pending.
+    pub full_load_confirm_pending: bool,
+    /// The file size (in MB) shown in the confirmation prompt.
+    pub full_load_pending_size_mb: f64,
 }
 
 impl App {
@@ -197,21 +150,22 @@ impl App {
     /// - Empty sessions list
     pub fn new(config: AppConfig) -> Self {
         let theme_colors = ThemeColors::from_theme(&config.theme);
+        let symbols = Symbols::new(config.ascii);
         Self {
             focus: Focus::Sidebar,
             sidebar_visible: true,
             should_quit: false,
             config,
             theme_colors,
+            symbols,
             ring_buffer: RingBuffer::with_default_budget(),
             sessions: Vec::new(),
             selected_session_index: 0,
             new_session_ids: HashSet::new(),
             sidebar_scroll_offset: 0,
             active_session_id: None,
-            active_filters: ActiveFilters::default(),
             filter_state: FilterState::default(),
-            filter_overlay: FilterOverlayState::default(),
+            filter_menu: FilterMenuState::default(),
             replay_offsets: HashMap::new(),
             status_message: None,
             project_path: None,
@@ -219,6 +173,10 @@ impl App {
             project_display_name: None,
             scroll_mode: None,
             pending_scroll: None,
+            search_state: SearchState::default(),
+            full_history_loaded: false,
+            full_load_confirm_pending: false,
+            full_load_pending_size_mb: 0.0,
         }
     }
 
@@ -229,35 +187,85 @@ impl App {
         // Clear transient status messages on any key press.
         self.status_message = None;
 
-        // When the help overlay is visible, ANY key dismisses it.
+        // When the help overlay is visible, only `?` (toggle) and `Escape` close it.
+        // All other keys are consumed without action.
         if self.help_overlay_visible {
-            self.help_overlay_visible = false;
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    self.help_overlay_visible = false;
+                }
+                _ => {} // consume the key
+            }
+            return;
+        }
+
+        // Full-load confirmation prompt: intercept y/n/Esc before anything else.
+        if self.full_load_confirm_pending {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.full_load_confirm_pending = false;
+                    self.perform_full_history_load();
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.full_load_confirm_pending = false;
+                    self.status_message = Some("Full history load cancelled".to_string());
+                }
+                _ => {} // consume other keys
+            }
             return;
         }
 
         // Ctrl+C always quits regardless of focus.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            // If overlay is visible, Ctrl+C cancels it instead of quitting.
-            if self.filter_overlay.visible {
-                self.filter_overlay.visible = false;
+            // If filter menu is visible, Ctrl+C cancels it instead of quitting.
+            if self.filter_menu.visible {
+                self.filter_menu.visible = false;
+                return;
+            }
+            // If search input is active, cancel it instead of quitting.
+            if self.search_state.is_input() {
+                self.search_state.cancel();
                 return;
             }
             self.initiate_quit();
             return;
         }
 
-        // When the filter overlay is visible, delegate ALL key events to it.
-        if self.filter_overlay.visible {
-            let action = self.filter_overlay.on_key(key);
+        // When search is in Input mode, delegate all key events to the search input handler.
+        if self.search_state.is_input() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search_state.cancel();
+                }
+                KeyCode::Enter => {
+                    self.search_state.confirm();
+                    // If search became active, force scroll mode so highlights are stable.
+                    if self.search_state.is_active() {
+                        self.force_scroll_mode_for_search();
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.search_state.on_backspace();
+                }
+                KeyCode::Char(ch) => {
+                    self.search_state.on_char(ch);
+                }
+                _ => {} // consume other keys
+            }
+            return;
+        }
+
+        // When the filter menu is visible, delegate ALL key events to it.
+        if self.filter_menu.visible {
+            let action = self.filter_menu.on_key(key);
             match action {
-                OverlayAction::Cancel => {
-                    self.filter_overlay.visible = false;
+                MenuAction::Close => {
+                    self.filter_menu.visible = false;
                 }
-                OverlayAction::Apply => {
-                    self.apply_filter();
-                    self.filter_overlay.visible = false;
+                MenuAction::Selected => {
+                    self.apply_filter_from_menu();
                 }
-                OverlayAction::Consumed => {}
+                MenuAction::Consumed => {}
             }
             return;
         }
@@ -272,8 +280,16 @@ impl App {
                 self.help_overlay_visible = true;
                 return;
             }
+            KeyCode::Char('f') => {
+                self.open_filter_menu();
+                return;
+            }
             KeyCode::Char('/') => {
-                self.open_filter_overlay();
+                self.search_state.start_input();
+                return;
+            }
+            KeyCode::Char('L') => {
+                self.handle_full_history_load();
                 return;
             }
             KeyCode::Tab => {
@@ -289,6 +305,28 @@ impl App {
                 return;
             }
             _ => {}
+        }
+
+        // Search active mode keys: n/N navigate matches, Esc cancels search.
+        if self.search_state.is_active() {
+            match key.code {
+                KeyCode::Char('n') => {
+                    self.search_state.next_match();
+                    self.invalidate_scroll_snapshot();
+                    return;
+                }
+                KeyCode::Char('N') => {
+                    self.search_state.prev_match();
+                    self.invalidate_scroll_snapshot();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.search_state.cancel();
+                    self.invalidate_scroll_snapshot();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Focus-dependent keys.
@@ -455,7 +493,7 @@ impl App {
         }
 
         // Ignore mouse events when overlays are active.
-        if self.help_overlay_visible || self.filter_overlay.visible {
+        if self.help_overlay_visible || self.filter_menu.visible {
             return;
         }
 
@@ -509,6 +547,13 @@ impl App {
 
         // Exit scroll mode when switching sessions.
         self.exit_scroll_mode();
+
+        // Cancel search when switching sessions (matches would be stale).
+        self.cancel_search();
+
+        // Reset full history loaded flag when switching sessions.
+        self.full_history_loaded = false;
+        self.full_load_confirm_pending = false;
 
         // Replay recent messages from the selected session.
         self.replay_session_entries(&session);
@@ -648,57 +693,181 @@ impl App {
         }
     }
 
-    // -- Filter overlay --------------------------------------------------
+    // -- Full history load ------------------------------------------------
 
-    /// Open the filter overlay, snapshotting known roles and agents
-    /// from the ring buffer.
-    fn open_filter_overlay(&mut self) {
-        let known_roles = self.collect_known_roles();
-        let known_agents = self.collect_known_agents();
-        self.filter_overlay
-            .open(&self.filter_state, known_roles, known_agents);
-    }
+    /// Size threshold (bytes) above which a confirmation prompt is shown.
+    const FULL_LOAD_SIZE_THRESHOLD: u64 = 50 * 1024 * 1024; // 50 MB
 
-    /// Apply the filter settings from the overlay to the app state.
-    fn apply_filter(&mut self) {
-        let new_state = self.filter_overlay.build_filter_state();
+    /// Handle the `L` key press for full history loading.
+    ///
+    /// If already loaded, shows a status message. Otherwise, checks file
+    /// size and either loads directly or shows a confirmation prompt.
+    fn handle_full_history_load(&mut self) {
+        if self.full_history_loaded {
+            self.status_message = Some("Full history already loaded".to_string());
+            return;
+        }
 
-        // Update the ActiveFilters for the status bar display.
-        self.active_filters = ActiveFilters {
-            pattern: if new_state.pattern.is_empty() {
-                None
-            } else {
-                Some(new_state.pattern.clone())
-            },
-            level: if new_state.enabled_roles.is_empty() {
-                None
-            } else {
-                let roles: Vec<String> = new_state.enabled_roles.iter().cloned().collect();
-                Some(roles.join(","))
-            },
+        // Need an active session to load.
+        let session = match self.get_active_session() {
+            Some(s) => s,
+            None => {
+                self.status_message = Some("No active session to load".to_string());
+                return;
+            }
         };
 
-        self.filter_state = new_state;
+        let total_size = session_file_size(&session);
+        if total_size > Self::FULL_LOAD_SIZE_THRESHOLD {
+            let size_mb = total_size as f64 / (1024.0 * 1024.0);
+            self.full_load_pending_size_mb = size_mb;
+            self.full_load_confirm_pending = true;
+            self.status_message = Some(format!(
+                "Session is {:.1} MB. Load full history? (y/n)",
+                size_mb
+            ));
+        } else {
+            self.perform_full_history_load();
+        }
+    }
+
+    /// Perform the actual full history load.
+    ///
+    /// Loads all visible entries from the active session, replaces the
+    /// ring buffer contents, restores scroll position (distance from bottom),
+    /// cancels search, and sets the `full_history_loaded` flag.
+    fn perform_full_history_load(&mut self) {
+        let session = match self.get_active_session() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Save the distance from bottom (so we can restore position after load).
+        let distance_from_bottom = self
+            .scroll_mode
+            .as_ref()
+            .map(|sm| sm.offset)
+            .unwrap_or(0);
+
+        let (entries, offsets) =
+            load_full_session(&session, &self.filter_state, self.config.verbose);
+        let entry_count = entries.len();
+
+        // Replace ring buffer contents.
+        self.ring_buffer.clear();
+        for entry in entries {
+            self.ring_buffer.push(entry);
+        }
+        self.replay_offsets = offsets;
+
+        // Cancel search (matches would be stale).
+        self.cancel_search();
+
+        // Restore scroll position: if we were in scroll mode, re-enter it
+        // at the same distance from bottom.
+        if distance_from_bottom > 0 {
+            self.pending_scroll = Some(PendingScroll::Up(distance_from_bottom));
+        } else {
+            // Exit scroll mode to show the latest entries.
+            self.exit_scroll_mode();
+        }
+
+        self.full_history_loaded = true;
+        self.status_message = Some(format!("Loaded full history ({} entries)", entry_count));
+    }
+
+    /// Get the currently active session, if any.
+    fn get_active_session(&self) -> Option<Session> {
+        let active_id = self.active_session_id.as_ref()?;
+        self.sessions.iter().find(|s| &s.id == active_id).cloned()
+    }
+
+    // -- Filter menu -----------------------------------------------------
+
+    /// Open the filter menu, populating it with the current filter state
+    /// and known agents from the ring buffer.
+    fn open_filter_menu(&mut self) {
+        let known_agents = self.collect_known_agents();
+        self.filter_menu.open(
+            self.filter_state.hide_tool_calls,
+            self.filter_state.selected_agent.clone(),
+            known_agents,
+        );
+    }
+
+    /// Apply the current filter menu selections to the app filter state.
+    ///
+    /// Called immediately on each menu selection (MenuAction::Selected).
+    fn apply_filter_from_menu(&mut self) {
+        self.filter_state.hide_tool_calls = self.filter_menu.hide_tool_calls;
+        self.filter_state.selected_agent = self.filter_menu.selected_agent.clone();
 
         // Exit scroll mode when filters change (content snapshot is stale).
         self.exit_scroll_mode();
+
+        // Cancel search when filters change (matches would be stale).
+        self.cancel_search();
     }
 
-    /// Collect unique message roles from entries in the ring buffer.
+    // -- Search ------------------------------------------------------------
+
+    /// Cancel any active search, resetting to Inactive state.
+    pub fn cancel_search(&mut self) {
+        self.search_state.cancel();
+    }
+
+    /// Force scroll mode when search is confirmed.
     ///
-    /// Returns a sorted list of role strings (e.g. `["assistant", "user"]`).
-    pub fn collect_known_roles(&self) -> Vec<String> {
-        let mut roles: HashSet<String> = HashSet::new();
-        for entry in self.ring_buffer.iter() {
-            if let Some(ref message) = entry.message {
-                if let Some(ref role) = message.role {
-                    roles.insert(role.clone());
-                }
-            }
+    /// This ensures highlights are stable and navigable. If scroll mode
+    /// is not already active, sets a pending scroll to the bottom.
+    fn force_scroll_mode_for_search(&mut self) {
+        if self.is_in_scroll_mode() {
+            // Already in scroll mode — invalidate the snapshot so the next render
+            // rebuilds lines and recomputes search highlights.
+            self.invalidate_scroll_snapshot();
+        } else {
+            // Set a pending scroll so the render phase creates a snapshot.
+            // We use Up(0) which will create the snapshot at the current bottom position.
+            self.pending_scroll = Some(PendingScroll::Up(0));
         }
-        let mut sorted: Vec<String> = roles.into_iter().collect();
-        sorted.sort();
-        sorted
+    }
+
+    /// Invalidate the current scroll snapshot, forcing a rebuild on the next render.
+    ///
+    /// Preserves the current scroll offset by converting the snapshot back to a
+    /// pending scroll. This is used when search highlights need to be recomputed
+    /// (e.g., after navigating to next/prev match or canceling search).
+    fn invalidate_scroll_snapshot(&mut self) {
+        if let Some(scroll) = self.scroll_mode.take() {
+            self.pending_scroll = Some(PendingScroll::Up(scroll.offset));
+        }
+    }
+
+    /// Scroll the view so the current search match is visible.
+    ///
+    /// Adjusts the scroll offset so the line containing the current match
+    /// is within the visible viewport.
+    pub fn scroll_to_current_search_match(&mut self) {
+        let target_line = match self.search_state.current_match_line() {
+            Some(line) => line,
+            None => return,
+        };
+
+        if let Some(ref mut sm) = self.scroll_mode {
+            let max_offset = sm.total_lines.saturating_sub(sm.visible_height);
+            // Convert target_line to our offset system (0 = bottom).
+            // ratatui_scroll = max_offset - offset, so target_line = max_offset - offset
+            // => offset = max_offset - target_line
+            // But we want the target line to be visible, so we center it.
+            let half_visible = sm.visible_height / 2;
+
+            // The ratatui scroll offset for the top of the viewport
+            // should be around target_line - half_visible.
+            let desired_ratatui_top = target_line.saturating_sub(half_visible);
+            // Convert to our offset: offset = max_offset - desired_ratatui_top
+            let new_offset = max_offset.saturating_sub(desired_ratatui_top);
+            sm.offset = new_offset.min(max_offset);
+        }
     }
 
     /// Collect unique agent identifiers from entries in the ring buffer.
@@ -1202,192 +1371,88 @@ mod tests {
         assert!(app.new_session_ids.is_empty());
         assert_eq!(app.sidebar_scroll_offset, 0);
         assert_eq!(app.active_session_id, None);
-        assert!(app.active_filters.is_empty());
+        assert!(!app.filter_state.is_active());
     }
 
-    // -- ActiveFilters -------------------------------------------------------
-
-    #[test]
-    fn test_active_filters_default_is_empty() {
-        let filters = ActiveFilters::default();
-        assert!(filters.is_empty());
-        assert_eq!(filters.display(), None);
-    }
-
-    #[test]
-    fn test_active_filters_with_pattern() {
-        let filters = ActiveFilters {
-            pattern: Some("error".to_string()),
-            level: None,
-        };
-        assert!(!filters.is_empty());
-        assert_eq!(filters.display(), Some("filter:error".to_string()));
-    }
-
-    #[test]
-    fn test_active_filters_with_level() {
-        let filters = ActiveFilters {
-            pattern: None,
-            level: Some("user".to_string()),
-        };
-        assert!(!filters.is_empty());
-        assert_eq!(filters.display(), Some("level:user".to_string()));
-    }
-
-    #[test]
-    fn test_active_filters_with_both() {
-        let filters = ActiveFilters {
-            pattern: Some("foo".to_string()),
-            level: Some("assistant".to_string()),
-        };
-        assert!(!filters.is_empty());
-        assert_eq!(
-            filters.display(),
-            Some("filter:foo level:assistant".to_string())
-        );
-    }
-
-    #[test]
-    fn test_active_filters_display_truncated_fits() {
-        let filters = ActiveFilters {
-            pattern: Some("err".to_string()),
-            level: None,
-        };
-        // "filter:err" is 10 chars, max_width=20 should not truncate
-        assert_eq!(
-            filters.display_truncated(20),
-            Some("filter:err".to_string())
-        );
-    }
-
-    #[test]
-    fn test_active_filters_display_truncated_too_narrow() {
-        let filters = ActiveFilters {
-            pattern: Some("error_pattern_very_long".to_string()),
-            level: None,
-        };
-        // "filter:error_pattern_very_long" = 30 chars, max_width=15
-        let result = filters.display_truncated(15);
-        assert!(result.is_some());
-        let text = result.unwrap();
-        assert!(text.ends_with("..."));
-        assert_eq!(text.len(), 15);
-    }
-
-    #[test]
-    fn test_active_filters_display_truncated_very_narrow() {
-        let filters = ActiveFilters {
-            pattern: Some("x".to_string()),
-            level: None,
-        };
-        // max_width < 4 should return None
-        assert_eq!(filters.display_truncated(3), None);
-    }
-
-    #[test]
-    fn test_active_filters_display_truncated_empty() {
-        let filters = ActiveFilters::default();
-        assert_eq!(filters.display_truncated(50), None);
-    }
-
-    // -- Filter overlay integration tests ---------------------------------
+    // -- Filter menu integration tests ------------------------------------
 
     #[test]
     fn test_new_defaults_filter_fields() {
         let app = App::new(test_config());
         assert!(!app.filter_state.is_active());
-        assert!(!app.filter_overlay.visible);
+        assert!(!app.filter_menu.visible);
     }
 
     #[test]
-    fn test_slash_key_opens_filter_overlay() {
+    fn test_f_key_opens_filter_menu() {
         let mut app = App::new(test_config());
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
     }
 
     #[test]
-    fn test_q_does_not_quit_when_overlay_is_open() {
+    fn test_q_does_not_quit_when_filter_menu_is_open() {
         let mut app = App::new(test_config());
-        // Open the overlay
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
+        // Open the filter menu
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
 
-        // 'q' inside overlay should NOT quit; it types 'q' in the pattern input
+        // 'q' inside filter menu should NOT quit; unknown keys are consumed
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.should_quit);
-        assert!(app.filter_overlay.visible);
-        assert_eq!(app.filter_overlay.pattern_input, "q");
+        assert!(app.filter_menu.visible);
     }
 
     #[test]
-    fn test_esc_closes_overlay_without_applying() {
+    fn test_esc_closes_filter_menu() {
         let mut app = App::new(test_config());
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
 
-        // Type something
-        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert_eq!(app.filter_overlay.pattern_input, "x");
-
-        // Esc should close without applying
+        // Esc should close
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.filter_overlay.visible);
-        assert!(!app.filter_state.is_active());
+        assert!(!app.filter_menu.visible);
     }
 
     #[test]
-    fn test_enter_applies_filter_and_closes_overlay() {
+    fn test_f_toggles_filter_menu_closed() {
         let mut app = App::new(test_config());
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
 
-        // Type a pattern
-        for c in "error".chars() {
-            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
+        // Pressing 'f' again inside menu should close it
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(!app.filter_menu.visible);
+    }
 
-        // Enter should apply and close
+    #[test]
+    fn test_enter_toggles_tool_calls_in_filter_menu() {
+        let mut app = App::new(test_config());
+        assert!(!app.filter_state.hide_tool_calls);
+
+        // Open filter menu (first item is ToolCallToggle, selected by default)
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
+
+        // Enter should toggle tool calls and apply immediately
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.filter_overlay.visible);
-        assert!(app.filter_state.is_active());
-        assert_eq!(app.filter_state.pattern, "error");
-        assert_eq!(app.active_filters.pattern, Some("error".to_string()));
+        assert!(app.filter_state.hide_tool_calls);
+        assert!(app.filter_menu.visible); // menu stays open on selection
+
+        // Toggle back
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.filter_state.hide_tool_calls);
     }
 
     #[test]
-    fn test_ctrl_c_closes_overlay_when_visible() {
+    fn test_ctrl_c_closes_filter_menu_when_visible() {
         let mut app = App::new(test_config());
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
 
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(!app.filter_overlay.visible);
+        assert!(!app.filter_menu.visible);
         assert!(!app.should_quit); // should NOT quit
-    }
-
-    #[test]
-    fn test_collect_known_roles_from_ring_buffer() {
-        use crate::log_entry::parse_jsonl_line;
-
-        let mut app = App::new(test_config());
-        app.ring_buffer.push(
-            parse_jsonl_line(r#"{"type": "user", "message": {"role": "user", "content": "hi"}}"#)
-                .unwrap(),
-        );
-        app.ring_buffer.push(
-            parse_jsonl_line(
-                r#"{"type": "assistant", "message": {"role": "assistant", "content": "hello"}}"#,
-            )
-            .unwrap(),
-        );
-        app.ring_buffer.push(
-            parse_jsonl_line(
-                r#"{"type": "user", "message": {"role": "user", "content": "again"}}"#,
-            )
-            .unwrap(),
-        );
-
-        let roles = app.collect_known_roles();
-        assert_eq!(roles, vec!["assistant", "user"]);
     }
 
     #[test]
@@ -1420,46 +1485,44 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_known_roles_empty_buffer() {
-        let app = App::new(test_config());
-        let roles = app.collect_known_roles();
-        assert!(roles.is_empty());
-    }
-
-    #[test]
-    fn test_apply_filter_updates_active_filters_display() {
+    fn test_apply_filter_from_menu_updates_filter_state() {
         let mut app = App::new(test_config());
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        // Open filter menu
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
 
-        for c in "test".chars() {
-            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-
+        // Toggle tool calls (Enter on first item)
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert!(!app.active_filters.is_empty());
-        let display = app.active_filters.display().unwrap();
-        assert!(display.contains("filter:test"));
-    }
-
-    #[test]
-    fn test_empty_filter_clears_active_filters() {
-        let mut app = App::new(test_config());
-
-        // First set a filter
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.filter_state.hide_tool_calls);
         assert!(app.filter_state.is_active());
+        let display = app.filter_state.display().unwrap();
+        assert!(display.contains("no tools"));
+    }
 
-        // Now open and apply empty filter
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        // Delete the character
-        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    #[test]
+    fn test_filter_state_display_reflects_tool_call_toggle() {
+        let mut app = App::new(test_config());
+        // Open filter menu
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        // Toggle tool calls on
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.filter_state.display(),
+            Some("[filter: no tools]".to_string())
+        );
 
-        assert!(!app.filter_state.is_active());
-        assert!(app.active_filters.is_empty());
+        // Toggle back off
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.filter_state.display(), None);
+    }
+
+    #[test]
+    fn test_slash_key_does_not_open_filter() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        // '/' opens search, not the filter menu
+        assert!(!app.filter_menu.visible);
     }
 
     // -- Status message tests ------------------------------------------------
@@ -1497,12 +1560,31 @@ mod tests {
     }
 
     #[test]
-    fn test_any_key_dismisses_help_overlay() {
+    fn test_escape_dismisses_help_overlay() {
+        let mut app = App::new(test_config());
+        app.help_overlay_visible = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.help_overlay_visible);
+    }
+
+    #[test]
+    fn test_question_mark_toggles_help_overlay_off() {
+        let mut app = App::new(test_config());
+        app.help_overlay_visible = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(!app.help_overlay_visible);
+    }
+
+    #[test]
+    fn test_random_key_does_not_dismiss_help_overlay() {
         let mut app = App::new(test_config());
         app.help_overlay_visible = true;
 
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert!(!app.help_overlay_visible);
+        // Help should still be visible; random keys are consumed but don't close.
+        assert!(app.help_overlay_visible);
     }
 
     #[test]
@@ -1510,33 +1592,34 @@ mod tests {
         let mut app = App::new(test_config());
         app.help_overlay_visible = true;
 
-        // 'q' should not quit; it should just dismiss the overlay.
+        // 'q' should not quit; it is consumed by the overlay.
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.help_overlay_visible);
+        assert!(app.help_overlay_visible);
         assert!(!app.should_quit);
     }
 
     #[test]
-    fn test_ctrl_c_dismisses_help_overlay_without_quitting() {
+    fn test_ctrl_c_consumed_while_help_overlay_visible() {
         let mut app = App::new(test_config());
         app.help_overlay_visible = true;
 
+        // Ctrl+C is consumed by the overlay (does not quit).
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(!app.help_overlay_visible);
+        assert!(app.help_overlay_visible);
         assert!(!app.should_quit);
     }
 
     #[test]
-    fn test_question_mark_does_not_open_help_when_filter_overlay_active() {
+    fn test_question_mark_does_not_open_help_when_filter_menu_active() {
         let mut app = App::new(test_config());
-        // Open the filter overlay first.
-        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        assert!(app.filter_overlay.visible);
+        // Open the filter menu first.
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
 
-        // '?' inside filter overlay should type into the pattern input, not open help.
+        // '?' inside filter menu should be consumed, not open help.
         app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(!app.help_overlay_visible);
-        assert!(app.filter_overlay.visible);
+        assert!(app.filter_menu.visible);
     }
 
     // -- on_new_file_detected tests -------------------------------------------
@@ -1866,11 +1949,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_filter_exits_scroll_mode() {
+    fn test_apply_filter_from_menu_exits_scroll_mode() {
         let mut app = app_with_scroll_mode(10, 100, 20);
-        // Open the filter overlay and apply an empty filter
-        app.filter_overlay.visible = true;
-        app.apply_filter();
+        // Simulate applying a filter from the menu
+        app.filter_menu.visible = true;
+        app.filter_menu.hide_tool_calls = true;
+        app.apply_filter_from_menu();
         assert!(app.scroll_mode.is_none());
         assert!(app.pending_scroll.is_none());
     }
@@ -1955,12 +2039,12 @@ mod tests {
     }
 
     #[test]
-    fn test_on_mouse_ignored_when_filter_overlay_visible() {
+    fn test_on_mouse_ignored_when_filter_menu_visible() {
         use crossterm::event::{MouseEvent, MouseEventKind};
 
         let mut app = App::new(test_config());
         app.focus = Focus::LogStream;
-        app.filter_overlay.visible = true;
+        app.filter_menu.visible = true;
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
@@ -2046,4 +2130,384 @@ mod tests {
         assert_eq!(app.scroll_mode.as_ref().unwrap().offset, 15);
     }
 
+    // -- Search tests --------------------------------------------------------
+
+    #[test]
+    fn test_new_defaults_search_state() {
+        let app = App::new(test_config());
+        assert!(!app.search_state.is_active());
+        assert!(!app.search_state.is_input());
+    }
+
+    #[test]
+    fn test_slash_key_starts_search_input() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.search_state.is_input());
+    }
+
+    #[test]
+    fn test_search_input_typing_and_confirm() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.search_state.is_input());
+
+        // Type "test"
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.search_state.input_buffer, "test");
+
+        // Confirm
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.search_state.is_active());
+        assert_eq!(app.search_state.query, "test");
+    }
+
+    #[test]
+    fn test_search_input_escape_cancels() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.search_state.is_input());
+        assert!(!app.search_state.is_active());
+    }
+
+    #[test]
+    fn test_search_input_backspace() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.search_state.input_buffer, "a");
+    }
+
+    #[test]
+    fn test_search_input_ctrl_c_cancels_instead_of_quit() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.search_state.is_input());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.search_state.is_input());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_search_q_does_not_quit_in_input_mode() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        // 'q' should be typed into the search buffer, not quit
+        assert!(!app.should_quit);
+        assert_eq!(app.search_state.input_buffer, "q");
+    }
+
+    #[test]
+    fn test_search_active_n_navigates_next() {
+        use crate::search::SearchMatch;
+
+        let mut app = App::new(test_config());
+        // Manually set up active search with matches
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+        app.search_state.matches = vec![
+            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
+            SearchMatch { line_index: 5, byte_start: 0, byte_len: 4 },
+        ];
+        app.search_state.current_match_index = Some(0);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.search_state.current_match_index, Some(1));
+    }
+
+    #[test]
+    fn test_search_active_shift_n_navigates_prev() {
+        use crate::search::SearchMatch;
+
+        let mut app = App::new(test_config());
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+        app.search_state.matches = vec![
+            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
+            SearchMatch { line_index: 5, byte_start: 0, byte_len: 4 },
+        ];
+        app.search_state.current_match_index = Some(1);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE));
+        assert_eq!(app.search_state.current_match_index, Some(0));
+    }
+
+    #[test]
+    fn test_search_active_escape_cancels() {
+        let mut app = App::new(test_config());
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.search_state.is_active());
+        assert!(app.search_state.query.is_empty());
+    }
+
+    #[test]
+    fn test_search_cancelled_on_filter_change() {
+        let mut app = App::new(test_config());
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+
+        // Simulate applying a filter from the menu
+        app.filter_menu.visible = true;
+        app.filter_menu.hide_tool_calls = true;
+        app.apply_filter_from_menu();
+
+        assert!(!app.search_state.is_active());
+    }
+
+    #[test]
+    fn test_search_cancelled_on_session_switch() {
+        let mut app = App::new(test_config());
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.query = "test".to_string();
+        app.sessions = vec![dummy_session("s1")];
+        app.selected_session_index = 0;
+
+        app.confirm_session_selection();
+
+        assert!(!app.search_state.is_active());
+    }
+
+    #[test]
+    fn test_search_confirm_forces_scroll_mode() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.search_state.is_active());
+        // Should have a pending scroll to enter scroll mode
+        assert!(app.pending_scroll.is_some());
+    }
+
+    #[test]
+    fn test_slash_does_not_open_search_when_filter_menu_visible() {
+        let mut app = App::new(test_config());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.filter_menu.visible);
+
+        // '/' inside filter menu should be consumed, not start search
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(!app.search_state.is_input());
+    }
+
+    #[test]
+    fn test_slash_does_not_open_search_when_help_visible() {
+        let mut app = App::new(test_config());
+        app.help_overlay_visible = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(!app.search_state.is_input());
+    }
+
+    #[test]
+    fn test_n_is_noop_when_search_not_active() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+
+        // 'n' when search is not active should be a no-op
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(!app.search_state.is_active());
+    }
+
+    #[test]
+    fn test_scroll_to_search_match() {
+        let mut app = app_with_scroll_mode(0, 100, 20);
+        app.search_state.mode = crate::search::SearchMode::Active;
+        app.search_state.matches = vec![
+            crate::search::SearchMatch { line_index: 50, byte_start: 0, byte_len: 4 },
+        ];
+        app.search_state.current_match_index = Some(0);
+
+        app.scroll_to_current_search_match();
+
+        // The offset should be adjusted so line 50 is visible
+        let offset = app.scroll_mode.as_ref().unwrap().offset;
+        assert!(offset > 0, "offset should have changed from 0");
+    }
+
+    // -- Full history load tests -------------------------------------------
+
+    #[test]
+    fn test_new_defaults_full_history_fields() {
+        let app = App::new(test_config());
+        assert!(!app.full_history_loaded);
+        assert!(!app.full_load_confirm_pending);
+        assert_eq!(app.full_load_pending_size_mb, 0.0);
+    }
+
+    #[test]
+    fn test_l_key_no_active_session_shows_status() {
+        let mut app = App::new(test_config());
+        // No active session, no sessions at all
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        assert!(!app.full_history_loaded);
+        assert!(app.status_message.is_some());
+        assert!(app.status_message.as_ref().unwrap().contains("No active session"));
+    }
+
+    #[test]
+    fn test_l_key_triggers_load_with_active_session() {
+        use std::fs;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("test-sess.jsonl");
+
+        // Write a small JSONL file (well under 50 MB)
+        let mut file = fs::File::create(&log_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","timestamp":"2025-01-15T10:00:00Z","message":{{"role":"user","content":[{{"type":"text","text":"hello"}}]}}}}"#
+        )
+        .unwrap();
+
+        let mut app = App::new(test_config());
+        app.sessions = vec![Session {
+            id: "test-sess".to_string(),
+            agents: vec![crate::session::Agent {
+                agent_id: None,
+                slug: None,
+                log_path,
+                is_main: true,
+            }],
+            last_modified: std::time::SystemTime::now(),
+        }];
+        app.active_session_id = Some("test-sess".to_string());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        assert!(app.full_history_loaded);
+        assert!(!app.full_load_confirm_pending);
+        assert!(app.status_message.is_some());
+        assert!(app.status_message.as_ref().unwrap().contains("Loaded full history"));
+    }
+
+    #[test]
+    fn test_full_history_loaded_flag_prevents_reload() {
+        let mut app = App::new(test_config());
+        app.full_history_loaded = true;
+        app.sessions = vec![dummy_session("s1")];
+        app.active_session_id = Some("s1".to_string());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        // Should show "already loaded" message, not reload
+        assert!(app.status_message.is_some());
+        assert!(
+            app.status_message
+                .as_ref()
+                .unwrap()
+                .contains("already loaded")
+        );
+    }
+
+    #[test]
+    fn test_confirmation_flow_y_accepts() {
+        let mut app = App::new(test_config());
+        app.full_load_confirm_pending = true;
+        app.full_load_pending_size_mb = 75.0;
+        // Need an active session for perform_full_history_load
+        app.sessions = vec![dummy_session("s1")];
+        app.active_session_id = Some("s1".to_string());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert!(!app.full_load_confirm_pending);
+        // full_history_loaded will be true (even if file doesn't exist, the flag is set)
+        assert!(app.full_history_loaded);
+    }
+
+    #[test]
+    fn test_confirmation_flow_n_cancels() {
+        let mut app = App::new(test_config());
+        app.full_load_confirm_pending = true;
+        app.full_load_pending_size_mb = 75.0;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert!(!app.full_load_confirm_pending);
+        assert!(!app.full_history_loaded);
+        assert!(app.status_message.is_some());
+        assert!(app.status_message.as_ref().unwrap().contains("cancelled"));
+    }
+
+    #[test]
+    fn test_confirmation_flow_esc_cancels() {
+        let mut app = App::new(test_config());
+        app.full_load_confirm_pending = true;
+        app.full_load_pending_size_mb = 75.0;
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!app.full_load_confirm_pending);
+        assert!(!app.full_history_loaded);
+    }
+
+    #[test]
+    fn test_confirmation_pending_consumes_other_keys() {
+        let mut app = App::new(test_config());
+        app.full_load_confirm_pending = true;
+
+        // 'q' should be consumed, not quit
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(app.full_load_confirm_pending);
+    }
+
+    #[test]
+    fn test_session_switch_resets_full_history_loaded() {
+        let mut app = App::new(test_config());
+        app.full_history_loaded = true;
+        app.full_load_confirm_pending = true;
+        app.sessions = vec![dummy_session("s1"), dummy_session("s2")];
+        app.selected_session_index = 1;
+
+        app.confirm_session_selection();
+
+        assert!(!app.full_history_loaded);
+        assert!(!app.full_load_confirm_pending);
+    }
+
+    #[test]
+    fn test_l_key_does_not_open_in_help_overlay() {
+        let mut app = App::new(test_config());
+        app.help_overlay_visible = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        // 'L' should be consumed by help overlay, not trigger load
+        assert!(!app.full_history_loaded);
+        assert!(app.help_overlay_visible); // help still visible
+    }
+
+    // -- Symbols / ASCII mode tests ----------------------------------------
+
+    #[test]
+    fn test_app_new_default_uses_unicode_symbols() {
+        let app = App::new(test_config());
+        assert_eq!(app.symbols.active_marker, "\u{25cf}");
+    }
+
+    #[test]
+    fn test_app_new_ascii_mode_uses_ascii_symbols() {
+        let mut config = test_config();
+        config.ascii = true;
+        let app = App::new(config);
+        assert_eq!(app.symbols.active_marker, "*");
+        assert_eq!(app.symbols.tree_connector, "`-");
+        assert_eq!(app.symbols.progress_indicator, ">");
+        assert_eq!(app.symbols.search_cursor, "_");
+    }
 }
