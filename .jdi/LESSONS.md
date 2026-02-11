@@ -27,3 +27,9 @@
 **Trigger:** REJECTED
 
 **Lesson:** The `find_matches()` function performs case-insensitive search by lowercasing both text and query, then returns byte offsets from the lowercased text. These offsets are later used to slice the original (non-lowercased) text in `highlight_line()`. When multi-byte Unicode characters change byte length during case conversion (e.g., German ß→ss, Turkish İ→i̇), the byte offsets become misaligned, causing potential panics. Byte offsets from string transformations must always be validated against or computed from the target string they will be applied to.
+
+## 2026-02-11 - Task #cc-tail-9qn, Step: review
+
+**Trigger:** REJECTED
+
+**Lesson:** Code quality review rejected because changing `FileWatchState::new()` from `pub(crate)` to `pub` triggered the `clippy::new_without_default` lint. When widening visibility of structs with `new()` methods, always check if a `Default` impl is needed to satisfy clippy lints.
