@@ -798,8 +798,8 @@ mod tests {
             ],
         );
 
-        let expected_size = std::fs::metadata(&path1).unwrap().len()
-            + std::fs::metadata(&path2).unwrap().len();
+        let expected_size =
+            std::fs::metadata(&path1).unwrap().len() + std::fs::metadata(&path2).unwrap().len();
 
         let session = make_session("s1", vec![path1, path2]);
         let total = session_file_size(&session);
@@ -816,10 +816,7 @@ mod tests {
         let existing_path = tmp.path().join("exists.jsonl");
         let missing_path = PathBuf::from("/nonexistent/missing.jsonl");
 
-        write_jsonl(
-            &existing_path,
-            &[&user_line("2025-01-15T10:00:00Z", "msg")],
-        );
+        write_jsonl(&existing_path, &[&user_line("2025-01-15T10:00:00Z", "msg")]);
 
         let expected_size = std::fs::metadata(&existing_path).unwrap().len();
 

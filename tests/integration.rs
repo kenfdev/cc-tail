@@ -78,18 +78,13 @@ fn test_session_discovery_to_replay() {
         "expected main + 1 subagent = 2 agents"
     );
 
-    let sub_agents: Vec<_> = sessions[0]
-        .agents
-        .iter()
-        .filter(|a| !a.is_main)
-        .collect();
+    let sub_agents: Vec<_> = sessions[0].agents.iter().filter(|a| !a.is_main).collect();
     assert_eq!(sub_agents.len(), 1);
     assert_eq!(sub_agents[0].agent_id.as_deref(), Some("sub-A"));
 
     // -- Replay session --
     let session = &sessions[0];
-    let (entries, eof_offsets) =
-        replay_session(session, &FilterState::default(), 20, false);
+    let (entries, eof_offsets) = replay_session(session, &FilterState::default(), 20, false);
 
     // Visible types: User, Assistant, System (result maps to System).
     // Progress should be excluded.
@@ -135,7 +130,8 @@ fn test_session_discovery_to_replay() {
     for (path, offset) in &eof_offsets {
         let file_len = std::fs::metadata(path).unwrap().len();
         assert_eq!(
-            *offset, file_len,
+            *offset,
+            file_len,
             "EOF offset for {} should match file length",
             path.display()
         );
@@ -227,10 +223,17 @@ fn test_filter_interaction_end_to_end() {
     let sub_b_1 = r#"{"type": "assistant", "timestamp": "2025-01-15T10:00:04Z", "sessionId": "sess-001", "isSidechain": true, "agentId": "sub-B", "message": {"role": "assistant", "content": [{"type": "text", "text": "sub-B msg 1"}]}}"#;
     let sub_b_2 = r#"{"type": "assistant", "timestamp": "2025-01-15T10:00:05Z", "sessionId": "sess-001", "isSidechain": true, "agentId": "sub-B", "message": {"role": "assistant", "content": [{"type": "text", "text": "sub-B msg 2"}]}}"#;
 
-    let entries: Vec<_> = [main_user, main_assistant, sub_a_1, sub_a_2, sub_b_1, sub_b_2]
-        .iter()
-        .map(|line| parse_jsonl_line(line).unwrap())
-        .collect();
+    let entries: Vec<_> = [
+        main_user,
+        main_assistant,
+        sub_a_1,
+        sub_a_2,
+        sub_b_1,
+        sub_b_2,
+    ]
+    .iter()
+    .map(|line| parse_jsonl_line(line).unwrap())
+    .collect();
 
     // -- Push all into RingBuffer --
     let mut buf = RingBuffer::new(100_000);
@@ -240,9 +243,7 @@ fn test_filter_interaction_end_to_end() {
 
     // -- Default filter: all 6 entries should be returned --
     let default_filter = FilterState::default();
-    let all: Vec<_> = buf
-        .iter_filtered(|e| default_filter.matches(e))
-        .collect();
+    let all: Vec<_> = buf.iter_filtered(|e| default_filter.matches(e)).collect();
     assert_eq!(all.len(), 6, "default filter should return all 6 entries");
 
     // -- Filter by agent "sub-A": should return only 2 sub-A entries --
@@ -250,9 +251,7 @@ fn test_filter_interaction_end_to_end() {
         hide_tool_calls: false,
         selected_agent: Some("sub-A".to_string()),
     };
-    let sub_a_entries: Vec<_> = buf
-        .iter_filtered(|e| filter_a.matches(e))
-        .collect();
+    let sub_a_entries: Vec<_> = buf.iter_filtered(|e| filter_a.matches(e)).collect();
     assert_eq!(
         sub_a_entries.len(),
         2,
@@ -267,9 +266,7 @@ fn test_filter_interaction_end_to_end() {
         hide_tool_calls: false,
         selected_agent: Some("sub-B".to_string()),
     };
-    let sub_b_entries: Vec<_> = buf
-        .iter_filtered(|e| filter_b.matches(e))
-        .collect();
+    let sub_b_entries: Vec<_> = buf.iter_filtered(|e| filter_b.matches(e)).collect();
     assert_eq!(
         sub_b_entries.len(),
         2,

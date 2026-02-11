@@ -100,10 +100,7 @@ pub fn wrapped_line_height(line: &ratatui::text::Line<'_>, width: u16) -> usize 
 
 /// Total visual (wrapped) lines for a slice of logical lines.
 pub fn total_visual_lines(lines: &[ratatui::text::Line<'_>], width: u16) -> usize {
-    lines
-        .iter()
-        .map(|l| wrapped_line_height(l, width))
-        .sum()
+    lines.iter().map(|l| wrapped_line_height(l, width)).sum()
 }
 
 /// Visual-line offset of logical line `idx` (i.e. the sum of wrapped
@@ -805,11 +802,7 @@ impl App {
         };
 
         // Save the distance from bottom (so we can restore position after load).
-        let distance_from_bottom = self
-            .scroll_mode
-            .as_ref()
-            .map(|sm| sm.offset)
-            .unwrap_or(0);
+        let distance_from_bottom = self.scroll_mode.as_ref().map(|sm| sm.offset).unwrap_or(0);
 
         let (entries, offsets) =
             load_full_session(&session, &self.filter_state, self.config.verbose);
@@ -2281,8 +2274,16 @@ mod tests {
         app.search_state.mode = crate::search::SearchMode::Active;
         app.search_state.query = "test".to_string();
         app.search_state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
-            SearchMatch { line_index: 5, byte_start: 0, byte_len: 4 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 4,
+            },
+            SearchMatch {
+                line_index: 5,
+                byte_start: 0,
+                byte_len: 4,
+            },
         ];
         app.search_state.current_match_index = Some(0);
 
@@ -2298,8 +2299,16 @@ mod tests {
         app.search_state.mode = crate::search::SearchMode::Active;
         app.search_state.query = "test".to_string();
         app.search_state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
-            SearchMatch { line_index: 5, byte_start: 0, byte_len: 4 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 4,
+            },
+            SearchMatch {
+                line_index: 5,
+                byte_start: 0,
+                byte_len: 4,
+            },
         ];
         app.search_state.current_match_index = Some(1);
 
@@ -2407,9 +2416,11 @@ mod tests {
             lines,
         });
         app.search_state.mode = crate::search::SearchMode::Active;
-        app.search_state.matches = vec![
-            crate::search::SearchMatch { line_index: 50, byte_start: 0, byte_len: 4 },
-        ];
+        app.search_state.matches = vec![crate::search::SearchMatch {
+            line_index: 50,
+            byte_start: 0,
+            byte_len: 4,
+        }];
         app.search_state.current_match_index = Some(0);
 
         app.scroll_to_current_search_match();
@@ -2424,10 +2435,7 @@ mod tests {
         use ratatui::text::{Line, Span};
 
         // Short lines (width < 80) → 1 visual line each.
-        let lines: Vec<Line> = vec![
-            Line::from("short"),
-            Line::from("also short"),
-        ];
+        let lines: Vec<Line> = vec![Line::from("short"), Line::from("also short")];
         assert_eq!(wrapped_line_height(&lines[0], 80), 1);
         assert_eq!(total_visual_lines(&lines, 80), 2);
         assert_eq!(visual_line_position(&lines, 0, 80), 0);
@@ -2435,10 +2443,7 @@ mod tests {
 
         // A 160-char line at width 80 → wraps to 2 visual lines.
         let long = "x".repeat(160);
-        let lines_with_wrap: Vec<Line> = vec![
-            Line::from(Span::raw(long)),
-            Line::from("after"),
-        ];
+        let lines_with_wrap: Vec<Line> = vec![Line::from(Span::raw(long)), Line::from("after")];
         assert_eq!(wrapped_line_height(&lines_with_wrap[0], 80), 2);
         assert_eq!(total_visual_lines(&lines_with_wrap, 80), 3);
         // "after" starts at visual line 2.
@@ -2476,9 +2481,11 @@ mod tests {
 
         // Match on logical line 7 → visual line position = 5*2 + 2*1 = 12.
         app.search_state.mode = crate::search::SearchMode::Active;
-        app.search_state.matches = vec![
-            crate::search::SearchMatch { line_index: 7, byte_start: 0, byte_len: 4 },
-        ];
+        app.search_state.matches = vec![crate::search::SearchMatch {
+            line_index: 7,
+            byte_start: 0,
+            byte_len: 4,
+        }];
         app.search_state.current_match_index = Some(0);
 
         app.scroll_to_current_search_match();
@@ -2513,7 +2520,11 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
         assert!(!app.full_history_loaded);
         assert!(app.status_message.is_some());
-        assert!(app.status_message.as_ref().unwrap().contains("No active session"));
+        assert!(app
+            .status_message
+            .as_ref()
+            .unwrap()
+            .contains("No active session"));
     }
 
     #[test]
@@ -2551,7 +2562,11 @@ mod tests {
         assert!(app.full_history_loaded);
         assert!(!app.full_load_confirm_pending);
         assert!(app.status_message.is_some());
-        assert!(app.status_message.as_ref().unwrap().contains("Loaded full history"));
+        assert!(app
+            .status_message
+            .as_ref()
+            .unwrap()
+            .contains("Loaded full history"));
     }
 
     #[test]
@@ -2565,12 +2580,11 @@ mod tests {
 
         // Should show "already loaded" message, not reload
         assert!(app.status_message.is_some());
-        assert!(
-            app.status_message
-                .as_ref()
-                .unwrap()
-                .contains("already loaded")
-        );
+        assert!(app
+            .status_message
+            .as_ref()
+            .unwrap()
+            .contains("already loaded"));
     }
 
     #[test]
@@ -2675,7 +2689,10 @@ mod tests {
     #[test]
     fn test_new_defaults_needs_redraw_true() {
         let app = App::new(test_config());
-        assert!(app.needs_redraw, "App::new() should set needs_redraw to true");
+        assert!(
+            app.needs_redraw,
+            "App::new() should set needs_redraw to true"
+        );
     }
 
     #[test]
@@ -2701,7 +2718,10 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         app.on_mouse(mouse);
-        assert!(app.needs_redraw, "on_mouse() should set needs_redraw to true");
+        assert!(
+            app.needs_redraw,
+            "on_mouse() should set needs_redraw to true"
+        );
     }
 
     #[test]
@@ -2716,7 +2736,10 @@ mod tests {
         )
         .unwrap();
         app.on_new_log_entry(entry);
-        assert!(app.needs_redraw, "on_new_log_entry() should set needs_redraw to true");
+        assert!(
+            app.needs_redraw,
+            "on_new_log_entry() should set needs_redraw to true"
+        );
     }
 
     #[test]
@@ -2727,7 +2750,10 @@ mod tests {
         // Even though this path won't classify to anything meaningful,
         // the method should still set the dirty flag.
         app.on_new_file_detected(std::path::PathBuf::from("/fake/new-file.jsonl"));
-        assert!(app.needs_redraw, "on_new_file_detected() should set needs_redraw to true");
+        assert!(
+            app.needs_redraw,
+            "on_new_file_detected() should set needs_redraw to true"
+        );
     }
 
     #[test]
@@ -2736,7 +2762,10 @@ mod tests {
         assert!(app.needs_redraw);
 
         app.needs_redraw = false;
-        assert!(!app.needs_redraw, "needs_redraw should be false after manual clear");
+        assert!(
+            !app.needs_redraw,
+            "needs_redraw should be false after manual clear"
+        );
     }
 
     #[test]
@@ -2745,6 +2774,9 @@ mod tests {
         app.needs_redraw = false;
 
         app.mark_dirty();
-        assert!(app.needs_redraw, "mark_dirty() should set needs_redraw to true");
+        assert!(
+            app.needs_redraw,
+            "mark_dirty() should set needs_redraw to true"
+        );
     }
 }

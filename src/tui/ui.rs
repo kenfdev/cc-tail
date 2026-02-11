@@ -21,7 +21,6 @@ use crate::session_stats::compute_session_stats;
 use crate::theme::ThemeColors;
 use crate::tui::app::{App, Focus, ScrollMode};
 
-
 // ---------------------------------------------------------------------------
 // Main draw function
 // ---------------------------------------------------------------------------
@@ -296,7 +295,9 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some(ref scroll) = app.scroll_mode {
         // scroll.offset is "visual lines from the bottom": 0 = bottom, max = top.
         // Convert to ratatui scroll (visual lines from the top).
-        let max_visual = scroll.total_visual_lines.saturating_sub(scroll.visible_height);
+        let max_visual = scroll
+            .total_visual_lines
+            .saturating_sub(scroll.visible_height);
         let ratatui_scroll = max_visual.saturating_sub(scroll.offset);
         let paragraph = Paragraph::new(scroll.lines.clone())
             .style(Style::default().fg(theme.logstream_text))
@@ -562,7 +563,9 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Convert scroll.offset (visual lines from bottom) to ratatui scroll (visual lines from top).
         let scroll_ref = app.scroll_mode.as_ref().unwrap();
-        let max_visual = scroll_ref.total_visual_lines.saturating_sub(scroll_ref.visible_height);
+        let max_visual = scroll_ref
+            .total_visual_lines
+            .saturating_sub(scroll_ref.visible_height);
         let ratatui_scroll = max_visual.saturating_sub(scroll_ref.offset);
         let paragraph = Paragraph::new(scroll_ref.lines.clone())
             .style(Style::default().fg(logstream_text_color))
@@ -739,7 +742,13 @@ fn apply_search_highlights(
         .enumerate()
         .map(|(line_idx, line)| {
             if let Some(line_matches) = matches_by_line.get(&line_idx) {
-                highlight_line(line, line_matches, current_match, match_style, current_style)
+                highlight_line(
+                    line,
+                    line_matches,
+                    current_match,
+                    match_style,
+                    current_style,
+                )
             } else {
                 line
             }
@@ -814,10 +823,7 @@ fn highlight_line(
                 } else {
                     match_style
                 };
-                new_spans.push(Span::styled(
-                    span_text[hl_start..hl_end].to_string(),
-                    style,
-                ));
+                new_spans.push(Span::styled(span_text[hl_start..hl_end].to_string(), style));
             }
 
             pos = r_end.min(span_end);
@@ -1027,7 +1033,11 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         ("<", theme.role_assistant, "Assistant message"),
         ("~", theme.role_tool_use, "Tool call"),
         ("?", theme.role_unknown, "Unknown role"),
-        (app.symbols.progress_indicator, theme.logstream_progress, "Progress indicator"),
+        (
+            app.symbols.progress_indicator,
+            theme.logstream_progress,
+            "Progress indicator",
+        ),
     ];
 
     // ----- Section 2: Complete Keybinding Reference -------------------------
@@ -1060,9 +1070,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
     //   + blank(1) + stats_header(1) + stats rows(~8)
     //   + blank(1) + footer(1) + borders(2)
     // Roughly: 6 + 2 + 18 + 2 + 10 + 4 = ~42
-    let stats_lines_count = 4
-        + stats.tool_call_breakdown.len().min(5)
-        + if stats.subagent_count > 0 { 1 } else { 0 };
+    let stats_lines_count =
+        4 + stats.tool_call_breakdown.len().min(5) + if stats.subagent_count > 0 { 1 } else { 0 };
     let content_height = 3   // title + blank + legend header
         + legend.len()       // legend rows
         + 2                  // agent prefix note + timestamp note
@@ -1070,7 +1079,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         + keybindings.len()  // keybind rows
         + 2                  // blank + stats header
         + stats_lines_count  // stats rows
-        + 2;                 // blank + footer
+        + 2; // blank + footer
     let overlay_height = (content_height as u16 + 2).min(area.height); // +2 for borders
 
     let x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
@@ -1106,10 +1115,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::DIM);
 
     // ---- Title
-    lines.push(Line::from(Span::styled(
-        " cc-tail Help",
-        section_style,
-    )));
+    lines.push(Line::from(Span::styled(" cc-tail Help", section_style)));
     lines.push(Line::from(""));
 
     // ---- Section 1: Symbol & Color Legend
@@ -1138,32 +1144,20 @@ fn draw_help_overlay(frame: &mut Frame, app: &App, area: Rect) {
 
     // ---- Section 2: Keybinding Reference
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Keybindings",
-        section_style,
-    )));
+    lines.push(Line::from(Span::styled(" Keybindings", section_style)));
     for (key, desc) in &keybindings {
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("   {:12}", key),
-                label_style,
-            ),
+            Span::styled(format!("   {:12}", key), label_style),
             Span::styled(desc.to_string(), text_style),
         ]));
     }
 
     // ---- Section 3: Session Stats
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Session Stats",
-        section_style,
-    )));
+    lines.push(Line::from(Span::styled(" Session Stats", section_style)));
 
     // Duration
-    let duration_text = stats
-        .duration_display
-        .as_deref()
-        .unwrap_or("--");
+    let duration_text = stats.duration_display.as_deref().unwrap_or("--");
     lines.push(Line::from(vec![
         Span::styled("   Duration:   ", label_style),
         Span::styled(duration_text.to_string(), text_style),
@@ -2522,7 +2516,6 @@ mod tests {
 
         let mut app = test_app();
 
-
         let progress_json = r#"{
             "type": "progress",
             "sessionId": "sess-001",
@@ -2545,7 +2538,6 @@ mod tests {
 
         let mut app = test_app();
 
-
         let progress_json = r#"{
             "type": "progress",
             "sessionId": "sess-001",
@@ -2567,7 +2559,6 @@ mod tests {
         use crate::log_entry::parse_jsonl_line;
 
         let mut app = test_app();
-
 
         // Progress entry with no data field
         let progress_json = r#"{
@@ -2934,8 +2925,16 @@ mod tests {
         app.search_state.mode = crate::search::SearchMode::Active;
         app.search_state.query = "test".to_string();
         app.search_state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 4 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 4 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 4,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 4,
+            },
         ];
         app.search_state.current_match_index = Some(0);
 
@@ -2956,23 +2955,15 @@ mod tests {
 
     #[test]
     fn test_line_to_text_concatenates_spans() {
-        let line = Line::from(vec![
-            Span::raw("hello "),
-            Span::raw("world"),
-        ]);
+        let line = Line::from(vec![Span::raw("hello "), Span::raw("world")]);
         assert_eq!(line_to_text(&line), "hello world");
     }
 
     #[test]
     fn test_apply_search_highlights_no_matches_returns_unchanged() {
         let lines = vec![Line::from("hello world")];
-        let result = apply_search_highlights(
-            lines.clone(),
-            &[],
-            None,
-            Style::default(),
-            Style::default(),
-        );
+        let result =
+            apply_search_highlights(lines.clone(), &[], None, Style::default(), Style::default());
         assert_eq!(result.len(), 1);
     }
 
@@ -2988,18 +2979,16 @@ mod tests {
             byte_len: 5,
         }];
 
-        let result = apply_search_highlights(
-            lines,
-            &matches,
-            Some(0),
-            match_style,
-            current_style,
-        );
+        let result = apply_search_highlights(lines, &matches, Some(0), match_style, current_style);
 
         assert_eq!(result.len(), 1);
         let spans = &result[0].spans;
         // Should have at least 2 spans: "hello " and highlighted "world"
-        assert!(spans.len() >= 2, "expected at least 2 spans, got {}", spans.len());
+        assert!(
+            spans.len() >= 2,
+            "expected at least 2 spans, got {}",
+            spans.len()
+        );
     }
 
     #[test]

@@ -495,10 +495,7 @@ mod tests {
     #[case(1024 * 1024, "1.0MB")]
     #[case(1572864, "1.5MB")]
     #[case(10485760, "10.0MB")]
-    fn test_format_size(
-        #[case] bytes: usize,
-        #[case] expected: &str,
-    ) {
+    fn test_format_size(#[case] bytes: usize, #[case] expected: &str) {
         assert_eq!(format_size(bytes), expected);
     }
 

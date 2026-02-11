@@ -61,7 +61,6 @@ pub struct FilterMenuState {
 
 // Default is derived (all fields default to false/0/None/empty).
 
-
 impl FilterMenuState {
     /// Open the filter menu with the given known agents.
     ///
@@ -153,11 +152,7 @@ impl FilterMenuState {
     pub fn item_label(&self, index: usize) -> String {
         match &self.items[index] {
             FilterMenuItem::ToolCallToggle => {
-                let checkbox = if self.hide_tool_calls {
-                    "[x]"
-                } else {
-                    "[ ]"
-                };
+                let checkbox = if self.hide_tool_calls { "[x]" } else { "[ ]" };
                 format!("{} Hide Tool Calls", checkbox)
             }
             FilterMenuItem::AgentAll => {
@@ -169,12 +164,11 @@ impl FilterMenuState {
                 format!("{} All Agents", radio)
             }
             FilterMenuItem::Agent(agent_id, display_name) => {
-                let radio =
-                    if self.selected_agent.as_deref() == Some(agent_id.as_str()) {
-                        "(*)"
-                    } else {
-                        "( )"
-                    };
+                let radio = if self.selected_agent.as_deref() == Some(agent_id.as_str()) {
+                    "(*)"
+                } else {
+                    "( )"
+                };
                 format!("{} {}", radio, display_name)
             }
         }

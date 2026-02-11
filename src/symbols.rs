@@ -38,10 +38,10 @@ impl Symbols {
     /// Unicode symbol set.
     pub fn unicode() -> Self {
         Self {
-            active_marker: "\u{25cf}",     // ●
-            tree_connector: "\u{2514}",    // └
+            active_marker: "\u{25cf}",      // ●
+            tree_connector: "\u{2514}",     // └
             progress_indicator: "\u{25b6}", // ▶
-            search_cursor: "\u{2588}",     // █
+            search_cursor: "\u{2588}",      // █
         }
     }
 

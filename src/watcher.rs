@@ -185,11 +185,7 @@ pub fn is_watched_jsonl(path: &Path) -> bool {
 ///
 /// Any trailing bytes that do not end with a newline are buffered in
 /// `state.incomplete_line_buf` for the next call.
-pub fn read_new_entries(
-    path: &Path,
-    state: &mut FileWatchState,
-    verbose: bool,
-) -> Vec<LogEntry> {
+pub fn read_new_entries(path: &Path, state: &mut FileWatchState, verbose: bool) -> Vec<LogEntry> {
     let mut entries = Vec::new();
 
     let mut file = match std::fs::File::open(path) {
@@ -484,9 +480,7 @@ fn process_notify_event(
                 // Also try to read any content that was written at creation time
                 // (handles race condition where data is written before the watcher
                 // sees the Modify event).
-                let state = file_states
-                    .entry(validated_path.clone())
-                    .or_default();
+                let state = file_states.entry(validated_path.clone()).or_default();
                 let entries = read_new_entries(&validated_path, state, verbose);
                 for entry in entries {
                     let _ = tx.blocking_send(WatcherEvent::NewEntry {
@@ -502,9 +496,7 @@ fn process_notify_event(
                     None => continue,
                 };
 
-                let state = file_states
-                    .entry(validated_path.clone())
-                    .or_default();
+                let state = file_states.entry(validated_path.clone()).or_default();
                 let entries = read_new_entries(&validated_path, state, verbose);
                 for entry in entries {
                     let _ = tx.blocking_send(WatcherEvent::NewEntry {
@@ -1211,8 +1203,7 @@ mod tests {
             write!(
                 file,
                 "{}\n{}",
-                r#"{"type": "user", "sessionId": "c1"}"#,
-                r#"{"type": "assis"#
+                r#"{"type": "user", "sessionId": "c1"}"#, r#"{"type": "assis"#
             )
             .unwrap();
             drop(file);
@@ -1257,8 +1248,7 @@ mod tests {
             write!(
                 file,
                 "{}\n{}",
-                r#"{"type": "system", "sessionId": "c3"}"#,
-                r#"{"type": "prog"#
+                r#"{"type": "system", "sessionId": "c3"}"#, r#"{"type": "prog"#
             )
             .unwrap();
             drop(file);
@@ -1282,8 +1272,7 @@ mod tests {
             write!(
                 file,
                 "{}\n{}\n",
-                r#"ress", "sessionId": "c4"}"#,
-                r#"{"type": "user", "sessionId": "c5"}"#
+                r#"ress", "sessionId": "c4"}"#, r#"{"type": "user", "sessionId": "c5"}"#
             )
             .unwrap();
             drop(file);
@@ -1294,10 +1283,7 @@ mod tests {
                 2,
                 "cycle 4: completed partial + one new complete"
             );
-            assert_eq!(
-                entries[0].entry_type,
-                crate::log_entry::EntryType::Progress
-            );
+            assert_eq!(entries[0].entry_type, crate::log_entry::EntryType::Progress);
             assert_eq!(entries[0].session_id.as_deref(), Some("c4"));
             assert_eq!(entries[1].entry_type, crate::log_entry::EntryType::User);
             assert_eq!(entries[1].session_id.as_deref(), Some("c5"));

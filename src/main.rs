@@ -1,8 +1,8 @@
-use clap::Parser;
 use cctail::cli::{Cli, Commands};
 use cctail::config::build_config;
 use cctail::stream;
 use cctail::tui;
+use clap::Parser;
 
 #[tokio::main]
 async fn main() {

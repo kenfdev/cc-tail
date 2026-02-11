@@ -528,9 +528,21 @@ mod tests {
     fn test_next_match_advances() {
         let mut state = SearchState::default();
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 2, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 2,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(0);
         state.next_match();
@@ -541,8 +553,16 @@ mod tests {
     fn test_next_match_wraps() {
         let mut state = SearchState::default();
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(1);
         state.next_match();
@@ -552,9 +572,11 @@ mod tests {
     #[test]
     fn test_next_match_from_none_goes_to_zero() {
         let mut state = SearchState::default();
-        state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-        ];
+        state.matches = vec![SearchMatch {
+            line_index: 0,
+            byte_start: 0,
+            byte_len: 3,
+        }];
         state.current_match_index = None;
         state.next_match();
         assert_eq!(state.current_match_index, Some(0));
@@ -571,9 +593,21 @@ mod tests {
     fn test_prev_match_goes_back() {
         let mut state = SearchState::default();
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 2, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 2,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(2);
         state.prev_match();
@@ -584,8 +618,16 @@ mod tests {
     fn test_prev_match_wraps() {
         let mut state = SearchState::default();
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(0);
         state.prev_match();
@@ -596,8 +638,16 @@ mod tests {
     fn test_prev_match_from_none_goes_to_last() {
         let mut state = SearchState::default();
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = None;
         state.prev_match();
@@ -618,9 +668,21 @@ mod tests {
         let mut state = SearchState::default();
         state.mode = SearchMode::Active;
         state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 1, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 2, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 0,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 1,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 2,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(2);
         assert_eq!(state.match_counter_display(), Some("[3/3]".to_string()));
@@ -637,9 +699,11 @@ mod tests {
     fn test_match_counter_display_active_no_current() {
         let mut state = SearchState::default();
         state.mode = SearchMode::Active;
-        state.matches = vec![
-            SearchMatch { line_index: 0, byte_start: 0, byte_len: 3 },
-        ];
+        state.matches = vec![SearchMatch {
+            line_index: 0,
+            byte_start: 0,
+            byte_len: 3,
+        }];
         state.current_match_index = None;
         assert_eq!(state.match_counter_display(), Some("[0/1]".to_string()));
     }
@@ -681,8 +745,16 @@ mod tests {
         assert!(state.current_match_line().is_none());
 
         state.matches = vec![
-            SearchMatch { line_index: 5, byte_start: 0, byte_len: 3 },
-            SearchMatch { line_index: 10, byte_start: 0, byte_len: 3 },
+            SearchMatch {
+                line_index: 5,
+                byte_start: 0,
+                byte_len: 3,
+            },
+            SearchMatch {
+                line_index: 10,
+                byte_start: 0,
+                byte_len: 3,
+            },
         ];
         state.current_match_index = Some(1);
         assert_eq!(state.current_match_line(), Some(10));
@@ -691,9 +763,11 @@ mod tests {
     #[test]
     fn test_current_match_line_no_index() {
         let mut state = SearchState::default();
-        state.matches = vec![
-            SearchMatch { line_index: 5, byte_start: 0, byte_len: 3 },
-        ];
+        state.matches = vec![SearchMatch {
+            line_index: 5,
+            byte_start: 0,
+            byte_len: 3,
+        }];
         assert!(state.current_match_line().is_none());
     }
 

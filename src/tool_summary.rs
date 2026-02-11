@@ -505,11 +505,7 @@ mod tests {
     #[case("hello world", 5, "hello…")]
     #[case("hello", 0, "…")]
     #[case("あいうえお", 3, "あいう…")]
-    fn test_truncate_chars(
-        #[case] input: &str,
-        #[case] max: usize,
-        #[case] expected: &str,
-    ) {
+    fn test_truncate_chars(#[case] input: &str, #[case] max: usize, #[case] expected: &str) {
         assert_eq!(truncate_chars(input, max), expected);
     }
 
@@ -651,11 +647,11 @@ mod tests {
     #[case("SECRET=topsecretvalue", "SECRET=[REDACTED]")]
     #[case("SECRET_KEY=mykey123", "SECRET_KEY=[REDACTED]")]
     #[case("DB_PASSWORD=p@ssw0rd!", "DB_PASSWORD=[REDACTED]")]
-    #[case("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[REDACTED]")]
-    fn test_redact_env_var_secrets(
-        #[case] input: &str,
-        #[case] expected: &str,
-    ) {
+    #[case(
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "AWS_SECRET_ACCESS_KEY=[REDACTED]"
+    )]
+    fn test_redact_env_var_secrets(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(redact_secrets(input), expected);
     }
 
