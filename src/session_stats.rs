@@ -171,8 +171,9 @@ fn compute_duration_display(earliest: Option<&str>, latest: Option<&str>) -> Opt
 /// - `2025-01-15T10:30:00.123Z`
 /// - `2025-01-15T10:30:00+00:00`
 ///
-/// Returns `None` for unparseable timestamps. This is a best-effort parser
-/// that avoids pulling in `chrono` as a dependency.
+/// Returns `None` for unparseable timestamps. This is a lightweight best-effort
+/// parser that does not depend on `chrono` (only relative UTC differences matter
+/// for duration calculation, so timezone conversion is unnecessary).
 fn parse_iso8601_to_epoch_secs(ts: &str) -> Option<u64> {
     // Strip fractional seconds and timezone suffix to get core datetime.
     // Expected: "YYYY-MM-DDTHH:MM:SS..."
@@ -579,6 +580,60 @@ mod tests {
         let stats = compute_session_stats(&buf);
         assert_eq!(stats.tool_call_count, 1);
         assert_eq!(stats.tool_call_breakdown[0], ("unknown".to_string(), 1));
+    }
+
+    // -- compute_session_stats: content variations (null, string, non-object) --
+
+    #[test]
+    fn test_content_variations_null_string_non_object_array() {
+        let mut buf = RingBuffer::new(100_000);
+
+        // Entry 1: content is null.
+        push_entry(
+            &mut buf,
+            r#"{"type": "assistant", "message": {"role": "assistant", "content": null}}"#,
+        );
+
+        // Entry 2: content is a plain string (no tool blocks).
+        push_entry(
+            &mut buf,
+            r#"{"type": "assistant", "message": {"role": "assistant", "content": "just text"}}"#,
+        );
+
+        // Entry 3: content is an array of non-object elements (integers, strings).
+        // These should be silently skipped — no panic, no tool count.
+        push_entry(
+            &mut buf,
+            r#"{"type": "assistant", "message": {"role": "assistant", "content": [42, "hello", true, null]}}"#,
+        );
+
+        // Entry 4: content is an array with a valid tool_use object.
+        push_entry(
+            &mut buf,
+            r#"{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/foo"}}]}}"#,
+        );
+
+        // Entry 5: content is an array mixing non-object elements with a valid tool_use.
+        push_entry(
+            &mut buf,
+            r#"{"type": "assistant", "message": {"role": "assistant", "content": ["text_element", {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}]}}"#,
+        );
+
+        let stats = compute_session_stats(&buf);
+
+        // Only entries 4 and 5 have valid tool_use blocks -> 2 total tool calls.
+        assert_eq!(stats.tool_call_count, 2);
+        assert_eq!(stats.entries_loaded, 5);
+        assert_eq!(stats.assistant_message_count, 5);
+
+        // Breakdown: Read=1, Bash=1
+        let tool_names: Vec<&str> = stats
+            .tool_call_breakdown
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(tool_names.contains(&"Read"));
+        assert!(tool_names.contains(&"Bash"));
     }
 
     // -- compute_duration_display edge cases ---------------------------------

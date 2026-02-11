@@ -790,6 +790,46 @@ mod tests {
         assert_eq!(offset, content.len() as u64);
     }
 
+    // -- replay_phase with interleaved valid/invalid JSON lines --------------
+
+    #[test]
+    fn test_replay_phase_interleaved_valid_invalid_lines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mixed.jsonl");
+
+        // Write a mix of valid entries, invalid JSON, and blank lines.
+        let content = concat!(
+            r#"{"type": "user", "timestamp": "2025-01-15T10:00:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}"#,
+            "\n",
+            "this is not valid json at all\n",
+            r#"{"type": "assistant", "timestamp": "2025-01-15T10:01:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}"#,
+            "\n",
+            "{broken json\n",
+            "\n",
+            r#"{"type": "system", "timestamp": "2025-01-15T10:02:00Z", "message": {"role": "user", "content": "sys prompt"}}"#,
+            "\n",
+            "  \n",
+            r#"not even close to json"#,
+            "\n",
+        );
+        std::fs::write(&path, content).unwrap();
+        let expected_len = content.len() as u64;
+
+        let config = StreamConfig {
+            path,
+            replay_count: 20,
+            verbose: false,
+            colors: AnsiColors::for_pipe(),
+            is_tty: false,
+        };
+
+        // replay_phase should not panic or error — bad lines are silently skipped.
+        let offset = replay_phase(&config).unwrap();
+
+        // EOF offset should equal the total file size.
+        assert_eq!(offset, expected_len);
+    }
+
     // -- FileWatchState::new_with_offset tests --------------------------------
 
     #[test]

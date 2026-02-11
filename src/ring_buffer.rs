@@ -452,7 +452,55 @@ mod tests {
         assert!(buf.len() >= 2); // at least the two medium entries
     }
 
-    // -- 12. Budget boundary pushes (exact fit) ---------------------------
+    // -- 12. Stress test: 10k entries with tight budget -------------------
+
+    #[test]
+    fn test_stress_10k_entries_tight_budget_byte_accounting() {
+        // Use a tight budget that can only hold a fraction of 10,000 entries.
+        // After all pushes, verify:
+        //   1. byte_size() equals sum of remaining entries' estimated_byte_size()
+        //   2. byte_size() <= budget
+        let entry_sample = make_entry_with_type("user", "measure");
+        let entry_approx_size = entry_sample.estimated_byte_size();
+
+        // Budget fits roughly 50 entries (intentionally tight for 10,000 pushes).
+        let budget = entry_approx_size * 50;
+        let mut buf = RingBuffer::new(budget);
+
+        for i in 0..10_000 {
+            let entry = make_entry_with_type("user", &format!("s{}", i));
+            buf.push(entry);
+        }
+
+        // Invariant 1: byte_size() must not exceed the budget.
+        assert!(
+            buf.byte_size() <= budget,
+            "byte_size() {} exceeds budget {}",
+            buf.byte_size(),
+            budget,
+        );
+
+        // Invariant 2: byte_size() must equal the sum of remaining entries'
+        // estimated_byte_size() values.
+        let sum_of_entries: usize = buf.iter().map(|e| e.estimated_byte_size()).sum();
+        assert_eq!(
+            buf.byte_size(),
+            sum_of_entries,
+            "byte_size() {} != sum of remaining entries {} (len={})",
+            buf.byte_size(),
+            sum_of_entries,
+            buf.len(),
+        );
+
+        // Sanity: buffer should contain a reasonable number of entries.
+        assert!(
+            buf.len() > 0 && buf.len() <= 50,
+            "expected 1-50 entries, got {}",
+            buf.len(),
+        );
+    }
+
+    // -- 13. Budget boundary pushes (exact fit) ---------------------------
 
     #[test]
     fn test_budget_boundary_exact_fit() {
