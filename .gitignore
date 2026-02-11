@@ -26,3 +26,6 @@ Thumbs.db
 
 # Beads runtime state
 .beads/
+
+# JDI reports
+.jdi/reports/
