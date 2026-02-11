@@ -88,6 +88,14 @@ timestamps = true
 timestamp_format = "%H:%M:%S"
 ```
 
+## Development
+
+```
+make setup
+```
+
+This configures git to use the shared hooks in `.githooks/` (auto-format with `cargo fmt`, lint with `cargo clippy` on every commit).
+
 ## License
 
 MIT
