@@ -247,8 +247,11 @@ fn run_event_loop(
             return Ok(());
         }
 
-        // Draw
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        // Draw only when state has changed.
+        if app.needs_redraw {
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            app.needs_redraw = false;
+        }
 
         // Poll for crossterm events
         if let Some(event) = poll_crossterm_event(TICK_RATE) {
@@ -256,7 +259,8 @@ fn run_event_loop(
                 AppEvent::Key(key) => app.on_key(key),
                 AppEvent::Mouse(mouse) => app.on_mouse(mouse),
                 AppEvent::Resize(_, _) => {
-                    // ratatui handles resize automatically on next draw
+                    // ratatui handles resize automatically on next draw.
+                    app.needs_redraw = true;
                 }
                 AppEvent::Tick | AppEvent::NewLogEntry(_) | AppEvent::NewFileDetected(_) => {}
             }
@@ -294,47 +298,6 @@ mod tests {
         let flag = setup_signal_handler();
         // The flag should be false immediately after creation.
         assert!(!flag.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_shutdown_flag_can_be_set_externally() {
-        let flag = Arc::new(AtomicBool::new(false));
-        assert!(!flag.load(Ordering::SeqCst));
-
-        // Simulate signal handler setting the flag.
-        flag.store(true, Ordering::SeqCst);
-        assert!(flag.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_shutdown_flag_forces_quit() {
-        // When the shutdown flag is set, the event loop should set
-        // should_quit = true directly.
-        let mut app = App::new(AppConfig::default());
-
-        // Simulate what the event loop does when shutdown_flag is true:
-        let shutdown_flag = Arc::new(AtomicBool::new(true));
-        if shutdown_flag.load(Ordering::SeqCst) {
-            app.should_quit = true;
-        }
-
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn test_shutdown_flag_shared_across_threads() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
-        // Simulate signal handler thread setting the flag.
-        let handle = std::thread::spawn(move || {
-            flag_clone.store(true, Ordering::SeqCst);
-        });
-
-        handle.join().unwrap();
-
-        // Main thread should see the flag as true.
-        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]

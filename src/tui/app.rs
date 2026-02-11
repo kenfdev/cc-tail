@@ -182,6 +182,9 @@ pub struct App {
     pub full_load_confirm_pending: bool,
     /// The file size (in MB) shown in the confirmation prompt.
     pub full_load_pending_size_mb: f64,
+    /// Dirty flag: when `true`, the next tick will redraw the terminal.
+    /// Set to `true` on any state mutation; cleared after `terminal.draw()`.
+    pub needs_redraw: bool,
 }
 
 impl App {
@@ -222,13 +225,22 @@ impl App {
             full_history_loaded: false,
             full_load_confirm_pending: false,
             full_load_pending_size_mb: 0.0,
+            needs_redraw: true,
         }
+    }
+
+    /// Mark the app as needing a redraw on the next tick.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn mark_dirty(&mut self) {
+        self.needs_redraw = true;
     }
 
     // -- Key handling --------------------------------------------------------
 
     /// Handle a key event, dispatching to the appropriate action.
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.needs_redraw = true;
         // Clear transient status messages on any key press.
         self.status_message = None;
 
@@ -532,6 +544,8 @@ impl App {
     /// ScrollUp enters/applies scroll up; ScrollDown scrolls down (only
     /// when already in scroll mode).
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        self.needs_redraw = true;
+
         // Only respond to mouse scroll when focused on LogStream.
         if self.focus != Focus::LogStream {
             return;
@@ -627,6 +641,7 @@ impl App {
     ///
     /// Called by the event loop when the watcher delivers a `NewLogEntry`.
     pub fn on_new_log_entry(&mut self, entry: crate::log_entry::LogEntry) {
+        self.needs_redraw = true;
         self.ring_buffer.push(entry);
     }
 
@@ -635,6 +650,8 @@ impl App {
     /// Classifies the file path and either creates a new session
     /// (for top-level files) or adds a subagent to an existing session.
     pub fn on_new_file_detected(&mut self, path: PathBuf) {
+        self.needs_redraw = true;
+
         // Need a project path to classify the file.
         let project_path = match &self.project_path {
             Some(p) => p.clone(),
@@ -2651,5 +2668,83 @@ mod tests {
         assert_eq!(app.symbols.tree_connector, "`-");
         assert_eq!(app.symbols.progress_indicator, ">");
         assert_eq!(app.symbols.search_cursor, "_");
+    }
+
+    // -- needs_redraw dirty-flag tests ----------------------------------------
+
+    #[test]
+    fn test_new_defaults_needs_redraw_true() {
+        let app = App::new(test_config());
+        assert!(app.needs_redraw, "App::new() should set needs_redraw to true");
+    }
+
+    #[test]
+    fn test_on_key_sets_needs_redraw() {
+        let mut app = App::new(test_config());
+        app.needs_redraw = false;
+
+        // Any key should set the dirty flag.
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(app.needs_redraw, "on_key() should set needs_redraw to true");
+    }
+
+    #[test]
+    fn test_on_mouse_sets_needs_redraw() {
+        let mut app = App::new(test_config());
+        app.focus = Focus::LogStream;
+        app.needs_redraw = false;
+
+        let mouse = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(mouse);
+        assert!(app.needs_redraw, "on_mouse() should set needs_redraw to true");
+    }
+
+    #[test]
+    fn test_on_new_log_entry_sets_needs_redraw() {
+        use crate::log_entry::parse_jsonl_line;
+
+        let mut app = App::new(test_config());
+        app.needs_redraw = false;
+
+        let entry = parse_jsonl_line(
+            r#"{"type": "user", "message": {"role": "user", "content": "hello"}}"#,
+        )
+        .unwrap();
+        app.on_new_log_entry(entry);
+        assert!(app.needs_redraw, "on_new_log_entry() should set needs_redraw to true");
+    }
+
+    #[test]
+    fn test_on_new_file_detected_sets_needs_redraw() {
+        let mut app = App::new(test_config());
+        app.needs_redraw = false;
+
+        // Even though this path won't classify to anything meaningful,
+        // the method should still set the dirty flag.
+        app.on_new_file_detected(std::path::PathBuf::from("/fake/new-file.jsonl"));
+        assert!(app.needs_redraw, "on_new_file_detected() should set needs_redraw to true");
+    }
+
+    #[test]
+    fn test_needs_redraw_false_after_manual_clear() {
+        let mut app = App::new(test_config());
+        assert!(app.needs_redraw);
+
+        app.needs_redraw = false;
+        assert!(!app.needs_redraw, "needs_redraw should be false after manual clear");
+    }
+
+    #[test]
+    fn test_mark_dirty_sets_needs_redraw() {
+        let mut app = App::new(test_config());
+        app.needs_redraw = false;
+
+        app.mark_dirty();
+        assert!(app.needs_redraw, "mark_dirty() should set needs_redraw to true");
     }
 }
