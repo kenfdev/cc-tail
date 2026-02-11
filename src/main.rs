@@ -1,24 +1,8 @@
-mod cli;
-mod config;
-mod content_render;
-mod filter;
-mod log_entry;
-mod project_path;
-mod replay;
-mod ring_buffer;
-mod search;
-mod session;
-mod session_stats;
-mod stream;
-mod symbols;
-mod theme;
-mod tool_summary;
-mod tui;
-mod watcher;
-
 use clap::Parser;
-use cli::{Cli, Commands};
-use config::build_config;
+use cctail::cli::{Cli, Commands};
+use cctail::config::build_config;
+use cctail::stream;
+use cctail::tui;
 
 #[tokio::main]
 async fn main() {
