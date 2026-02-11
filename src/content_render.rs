@@ -140,6 +140,7 @@ fn format_size(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json::json;
 
     // -----------------------------------------------------------------------
@@ -484,52 +485,21 @@ mod tests {
     // 7. Size formatting tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_format_size_zero_bytes() {
-        assert_eq!(format_size(0), "0B");
-    }
-
-    #[test]
-    fn test_format_size_small_bytes() {
-        assert_eq!(format_size(42), "42B");
-    }
-
-    #[test]
-    fn test_format_size_just_under_1kb() {
-        assert_eq!(format_size(1023), "1023B");
-    }
-
-    #[test]
-    fn test_format_size_exactly_1kb() {
-        assert_eq!(format_size(1024), "1.0KB");
-    }
-
-    #[test]
-    fn test_format_size_kilobytes() {
-        // 12.3 * 1024 = 12595.2 -> 12595
-        assert_eq!(format_size(12595), "12.3KB");
-    }
-
-    #[test]
-    fn test_format_size_just_under_1mb() {
-        assert_eq!(format_size(1024 * 1024 - 1), "1024.0KB");
-    }
-
-    #[test]
-    fn test_format_size_exactly_1mb() {
-        assert_eq!(format_size(1024 * 1024), "1.0MB");
-    }
-
-    #[test]
-    fn test_format_size_megabytes() {
-        // 1.5 * 1024 * 1024 = 1572864
-        assert_eq!(format_size(1572864), "1.5MB");
-    }
-
-    #[test]
-    fn test_format_size_large_megabytes() {
-        // 10 * 1024 * 1024 = 10485760
-        assert_eq!(format_size(10485760), "10.0MB");
+    #[rstest]
+    #[case(0, "0B")]
+    #[case(42, "42B")]
+    #[case(1023, "1023B")]
+    #[case(1024, "1.0KB")]
+    #[case(12595, "12.3KB")]
+    #[case(1024 * 1024 - 1, "1024.0KB")]
+    #[case(1024 * 1024, "1.0MB")]
+    #[case(1572864, "1.5MB")]
+    #[case(10485760, "10.0MB")]
+    fn test_format_size(
+        #[case] bytes: usize,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(format_size(bytes), expected);
     }
 
     // -----------------------------------------------------------------------
@@ -619,79 +589,26 @@ mod tests {
     // 9. has_renderable_content tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_has_renderable_content_string() {
-        assert!(has_renderable_content(&json!("hello")));
+    #[rstest]
+    #[case(json!("hello"))]
+    #[case(json!(""))]
+    #[case(json!([{"type": "text", "text": "hi"}]))]
+    #[case(json!([{"type": "tool_use", "name": "Read", "input": {}}]))]
+    #[case(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "data"}, {"type": "text", "text": "visible"}]))]
+    #[case(json!([{"type": "thinking", "thinking": "hmm"}]))]
+    fn test_has_renderable_content_true(#[case] content: Value) {
+        assert!(has_renderable_content(&content));
     }
 
-    #[test]
-    fn test_has_renderable_content_empty_string() {
-        assert!(has_renderable_content(&json!("")));
-    }
-
-    #[test]
-    fn test_has_renderable_content_text_block() {
-        assert!(has_renderable_content(
-            &json!([{"type": "text", "text": "hi"}])
-        ));
-    }
-
-    #[test]
-    fn test_has_renderable_content_tool_use_block() {
-        assert!(has_renderable_content(
-            &json!([{"type": "tool_use", "name": "Read", "input": {}}])
-        ));
-    }
-
-    #[test]
-    fn test_has_renderable_content_tool_result_only() {
-        assert!(!has_renderable_content(&json!([
-            {"type": "tool_result", "tool_use_id": "t1", "content": "data"}
-        ])));
-    }
-
-    #[test]
-    fn test_has_renderable_content_multiple_tool_results() {
-        assert!(!has_renderable_content(&json!([
-            {"type": "tool_result", "tool_use_id": "t1", "content": "data1"},
-            {"type": "tool_result", "tool_use_id": "t2", "content": "data2"}
-        ])));
-    }
-
-    #[test]
-    fn test_has_renderable_content_tool_result_with_text() {
-        assert!(has_renderable_content(&json!([
-            {"type": "tool_result", "tool_use_id": "t1", "content": "data"},
-            {"type": "text", "text": "visible"}
-        ])));
-    }
-
-    #[test]
-    fn test_has_renderable_content_empty_array() {
-        assert!(!has_renderable_content(&json!([])));
-    }
-
-    #[test]
-    fn test_has_renderable_content_null() {
-        assert!(!has_renderable_content(&Value::Null));
-    }
-
-    #[test]
-    fn test_has_renderable_content_number() {
-        assert!(!has_renderable_content(&json!(42)));
-    }
-
-    #[test]
-    fn test_has_renderable_content_non_object_elements() {
-        assert!(!has_renderable_content(&json!([42, "string", true])));
-    }
-
-    #[test]
-    fn test_has_renderable_content_unknown_type() {
-        // Unknown block types still produce RenderedLine::Unknown, so they are renderable.
-        assert!(has_renderable_content(
-            &json!([{"type": "thinking", "thinking": "hmm"}])
-        ));
+    #[rstest]
+    #[case(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "data"}]))]
+    #[case(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "data1"}, {"type": "tool_result", "tool_use_id": "t2", "content": "data2"}]))]
+    #[case(json!([]))]
+    #[case(json!(null))]
+    #[case(json!(42))]
+    #[case(json!([42, "string", true]))]
+    fn test_has_renderable_content_false(#[case] content: Value) {
+        assert!(!has_renderable_content(&content));
     }
 
     // -----------------------------------------------------------------------

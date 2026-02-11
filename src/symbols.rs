@@ -65,24 +65,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_unicode_symbols() {
-        let s = Symbols::unicode();
-        assert_eq!(s.active_marker, "\u{25cf}");
-        assert_eq!(s.tree_connector, "\u{2514}");
-        assert_eq!(s.progress_indicator, "\u{25b6}");
-        assert_eq!(s.search_cursor, "\u{2588}");
-    }
-
-    #[test]
-    fn test_ascii_symbols() {
-        let s = Symbols::ascii();
-        assert_eq!(s.active_marker, "*");
-        assert_eq!(s.tree_connector, "`-");
-        assert_eq!(s.progress_indicator, ">");
-        assert_eq!(s.search_cursor, "_");
-    }
-
-    #[test]
     fn test_symbols_new_false_is_unicode() {
         let s = Symbols::new(false);
         assert_eq!(s.active_marker, "\u{25cf}");

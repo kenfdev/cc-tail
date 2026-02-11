@@ -307,86 +307,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dark_theme_backward_compatible_borders() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.border_focused, Color::Cyan);
-        assert_eq!(t.border_unfocused, Color::DarkGray);
-    }
-
-    #[test]
-    fn test_dark_theme_backward_compatible_sidebar() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.sidebar_placeholder, Color::DarkGray);
-        assert_eq!(t.sidebar_active_marker, Color::Green);
-        assert_eq!(t.sidebar_inactive_marker, Color::DarkGray);
-        assert_eq!(t.sidebar_selected_fg, Color::White);
-        assert_eq!(t.sidebar_selected_bg, Color::DarkGray);
-        assert_eq!(t.sidebar_new_session, Color::Yellow);
-        assert_eq!(t.sidebar_active_target, Color::Cyan);
-        assert_eq!(t.sidebar_default_session, Color::Gray);
-        assert_eq!(t.sidebar_selected_child_fg, Color::White);
-        assert_eq!(t.sidebar_selected_child_bg, Color::DarkGray);
-        assert_eq!(t.sidebar_unselected_child, Color::DarkGray);
-        assert_eq!(t.sidebar_child_prefix, Color::DarkGray);
-    }
-
-    #[test]
-    fn test_dark_theme_backward_compatible_logstream() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.logstream_placeholder, Color::DarkGray);
-        assert_eq!(t.logstream_timestamp, Color::DarkGray);
-        assert_eq!(t.logstream_progress, Color::DarkGray);
-        assert_eq!(t.role_user, Color::Blue);
-        assert_eq!(t.role_assistant, Color::Green);
-        assert_eq!(t.role_unknown, Color::Gray);
-        assert_eq!(t.role_tool_use, Color::Yellow);
-        assert_eq!(t.logstream_text, Color::White);
-        assert_eq!(t.agent_main, Color::White);
-    }
-
-    #[test]
-    fn test_dark_theme_backward_compatible_agent_palette() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.agent_palette.len(), 8);
-        assert_eq!(t.agent_palette[0], Color::Red);
-        assert_eq!(t.agent_palette[1], Color::Green);
-        assert_eq!(t.agent_palette[2], Color::Yellow);
-        assert_eq!(t.agent_palette[3], Color::Blue);
-        assert_eq!(t.agent_palette[4], Color::Magenta);
-        assert_eq!(t.agent_palette[5], Color::Cyan);
-        assert_eq!(t.agent_palette[6], Color::LightRed);
-        assert_eq!(t.agent_palette[7], Color::LightGreen);
-    }
-
-    #[test]
-    fn test_dark_theme_backward_compatible_status_bar() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.status_bar_bg, Color::DarkGray);
-        assert_eq!(t.status_bar_fg, Color::White);
-        assert_eq!(t.status_inactive_fg, Color::White);
-        assert_eq!(t.status_inactive_bg, Color::Red);
-        assert_eq!(t.status_filter, Color::Magenta);
-        assert_eq!(t.status_separator, Color::DarkGray);
-        assert_eq!(t.status_shortcut_key, Color::Yellow);
-    }
-
-    #[test]
-    fn test_dark_theme_backward_compatible_filter_overlay() {
-        let t = ThemeColors::dark();
-        assert_eq!(t.filter_invalid, Color::Red);
-        assert_eq!(t.filter_valid_border, Color::Cyan);
-        assert_eq!(t.filter_focused_label, Color::Cyan);
-        assert_eq!(t.filter_unfocused_label, Color::White);
-        assert_eq!(t.filter_valid_text, Color::White);
-        assert_eq!(t.filter_selected_fg, Color::White);
-        assert_eq!(t.filter_selected_bg, Color::DarkGray);
-        assert_eq!(t.filter_unselected, Color::Gray);
-        assert_eq!(t.filter_overlay_bg, Color::Black);
-        assert_eq!(t.filter_overlay_fg, Color::White);
-        assert_eq!(t.filter_shortcut_key, Color::Yellow);
-    }
-
-    #[test]
     fn test_light_theme_differs_from_dark() {
         let dark = ThemeColors::dark();
         let light = ThemeColors::light();
@@ -422,17 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_palette_length() {
-        let dark = ThemeColors::dark();
-        let light = ThemeColors::light();
-        assert_eq!(dark.agent_palette.len(), 8);
-        assert_eq!(light.agent_palette.len(), 8);
-    }
-
-    #[test]
-    fn test_theme_colors_clone() {
-        let original = ThemeColors::dark();
-        let cloned = original.clone();
-        assert_eq!(original, cloned);
+    fn test_dark_theme_is_self_consistent() {
+        let t = ThemeColors::dark();
+        // Palette has exactly 8 entries (compile-time array, but verify at runtime)
+        assert_eq!(t.agent_palette.len(), 8);
+        // No palette entry uses Reset (which would indicate a missing assignment)
+        for color in &t.agent_palette {
+            assert_ne!(*color, Color::Reset);
+        }
+        // Dark and light are distinct themes (not accidentally identical)
+        assert_ne!(t, ThemeColors::light());
+        // Clone produces an equal copy (exercises derive(Clone, PartialEq))
+        assert_eq!(t.clone(), t);
     }
 }

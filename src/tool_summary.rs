@@ -193,6 +193,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json::json;
 
     // -----------------------------------------------------------------------
@@ -395,22 +396,16 @@ mod tests {
     // Fallback tests: wrong types
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_read_file_path_is_number() {
-        let input = json!({"file_path": 42});
-        assert_eq!(summarize_tool_use("Read", &input), "[Read]");
-    }
-
-    #[test]
-    fn test_bash_command_is_array() {
-        let input = json!({"command": ["ls", "-la"]});
-        assert_eq!(summarize_tool_use("Bash", &input), "[Bash]");
-    }
-
-    #[test]
-    fn test_grep_pattern_is_bool() {
-        let input = json!({"pattern": true, "path": "src/"});
-        assert_eq!(summarize_tool_use("Grep", &input), "[Grep]");
+    #[rstest]
+    #[case("Read", json!({"file_path": 42}), "[Read]")]
+    #[case("Bash", json!({"command": ["ls", "-la"]}), "[Bash]")]
+    #[case("Grep", json!({"pattern": true, "path": "src/"}), "[Grep]")]
+    fn test_wrong_type_fields_fallback(
+        #[case] tool: &str,
+        #[case] input: Value,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(summarize_tool_use(tool, &input), expected);
     }
 
     // -----------------------------------------------------------------------
@@ -503,36 +498,19 @@ mod tests {
     // truncate_chars unit tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_truncate_chars_empty() {
-        assert_eq!(truncate_chars("", 10), "");
-    }
-
-    #[test]
-    fn test_truncate_chars_under() {
-        assert_eq!(truncate_chars("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_chars_exact() {
-        assert_eq!(truncate_chars("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_chars_over() {
-        assert_eq!(truncate_chars("hello world", 5), "hello…");
-    }
-
-    #[test]
-    fn test_truncate_chars_zero_max() {
-        assert_eq!(truncate_chars("hello", 0), "…");
-    }
-
-    #[test]
-    fn test_truncate_chars_multibyte() {
-        // Each Japanese character is 1 char (3 bytes in UTF-8)
-        let s = "あいうえお"; // 5 chars
-        assert_eq!(truncate_chars(s, 3), "あいう…");
+    #[rstest]
+    #[case("", 10, "")]
+    #[case("hello", 10, "hello")]
+    #[case("hello", 5, "hello")]
+    #[case("hello world", 5, "hello…")]
+    #[case("hello", 0, "…")]
+    #[case("あいうえお", 3, "あいう…")]
+    fn test_truncate_chars(
+        #[case] input: &str,
+        #[case] max: usize,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(truncate_chars(input, max), expected);
     }
 
     // -----------------------------------------------------------------------
@@ -667,46 +645,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_redact_api_key_env_var() {
-        assert_eq!(
-            redact_secrets("export API_KEY=supersecretvalue123"),
-            "export API_KEY=[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn test_redact_password_env_var() {
-        assert_eq!(redact_secrets("PASSWORD=hunter2"), "PASSWORD=[REDACTED]");
-    }
-
-    #[test]
-    fn test_redact_secret_env_var() {
-        assert_eq!(redact_secrets("SECRET=topsecretvalue"), "SECRET=[REDACTED]");
-    }
-
-    #[test]
-    fn test_redact_secret_key_env_var() {
-        assert_eq!(
-            redact_secrets("SECRET_KEY=mykey123"),
-            "SECRET_KEY=[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn test_redact_db_password_env_var() {
-        assert_eq!(
-            redact_secrets("DB_PASSWORD=p@ssw0rd!"),
-            "DB_PASSWORD=[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn test_redact_aws_secret() {
-        assert_eq!(
-            redact_secrets("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
-            "AWS_SECRET_ACCESS_KEY=[REDACTED]"
-        );
+    #[rstest]
+    #[case("export API_KEY=supersecretvalue123", "export API_KEY=[REDACTED]")]
+    #[case("PASSWORD=hunter2", "PASSWORD=[REDACTED]")]
+    #[case("SECRET=topsecretvalue", "SECRET=[REDACTED]")]
+    #[case("SECRET_KEY=mykey123", "SECRET_KEY=[REDACTED]")]
+    #[case("DB_PASSWORD=p@ssw0rd!", "DB_PASSWORD=[REDACTED]")]
+    #[case("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[REDACTED]")]
+    fn test_redact_env_var_secrets(
+        #[case] input: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(redact_secrets(input), expected);
     }
 
     #[test]
