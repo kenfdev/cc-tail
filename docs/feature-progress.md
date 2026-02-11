@@ -330,6 +330,90 @@ Fix scroll system to use visual (wrapped) line counts instead of logical line co
 
 ---
 
+## 28. Timestamp Timezone Conversion (UTC to Local)
+
+Convert displayed timestamps from raw UTC to the host's local timezone using the `chrono` crate.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Add `chrono` dependency with `clock` feature, update `format_timestamp` in `stream.rs` and `tui/ui.rs`, update tests to compute expected local time dynamically |
+| Implement | `[x]` | **`Cargo.toml`**: Added `chrono = { version = "0.4", default-features = false, features = ["clock"] }`. **`src/stream.rs`**: Rewrote `format_timestamp()` to parse with `DateTime::parse_from_rfc3339`, convert via `.with_timezone(&chrono::Local)`, format as `%H:%M:%S`. Fallback `"--:--:--"` unchanged. Updated 7 tests (3 timestamp tests + 3 print_entry tests + 1 helper function) to use `expected_local_time()` helper. **`src/tui/ui.rs`**: Same `format_timestamp()` rewrite for `&Option<String>` signature. Updated 7 tests (3 timestamp tests + 1 helper function). Edge case tests (None, malformed, empty, short) unchanged. **No changes to `src/session_stats.rs`** (duration uses relative UTC differences). All 713 tests pass, zero clippy warnings. |
+| Review | `[x]` | All 713 tests pass, `cargo clippy -- -D warnings` clean. Tests use dynamic `expected_local_time()` helper so they pass in any timezone. |
+
+---
+
+## 29. Dirty-Flag Redraw Optimization
+
+Eliminate idle CPU usage by gating `terminal.draw()` on a `needs_redraw` dirty flag, so the TUI only redraws when state actually changes.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Add `needs_redraw: bool` to `App`, set on every mutation point (`on_key`, `on_mouse`, `on_new_log_entry`, `on_new_file_detected`, `Resize`), gate `terminal.draw()` on the flag, clear after draw. |
+| Implement | `[x]` | **`src/tui/app.rs`**: Added `needs_redraw: bool` field (initialized `true`), `mark_dirty()` helper. Set `needs_redraw = true` at top of `on_key()`, `on_mouse()`, `on_new_log_entry()`, `on_new_file_detected()`. **`src/tui/mod.rs`**: Gated `terminal.draw()` with `if app.needs_redraw { ... app.needs_redraw = false; }`. Set `app.needs_redraw = true` in `Resize` event arm. 7 new tests. All 720 tests pass, zero clippy warnings. |
+| Review | `[x]` | 7 new unit tests: `test_new_defaults_needs_redraw_true`, `test_on_key_sets_needs_redraw`, `test_on_mouse_sets_needs_redraw`, `test_on_new_log_entry_sets_needs_redraw`, `test_on_new_file_detected_sets_needs_redraw`, `test_needs_redraw_false_after_manual_clear`, `test_mark_dirty_sets_needs_redraw`. All 720 tests pass, `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 30. Polish CLI and README for Public Release
+
+Add `--version` flag to CLI, rewrite README with badges/features/keybindings/configuration, and update feature progress.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | One-line CLI change, full README rewrite (~94 lines), feature-progress update |
+| Implement | `[x]` | **`src/cli.rs`**: Added `version` to `#[command()]` attribute. Enables `cctail --version` / `cctail -V`. **`README.md`**: Full rewrite (~94 lines). Added crates.io/CI/license badges, demo GIF placeholder, 9-item Features section, fixed keybinding table (13 entries matching `app.rs`), Configuration section with example TOML, kept Installation/Usage/License. **`docs/feature-progress.md`**: Added section #30 and summary row. |
+| Review | `[x]` | `cargo build` succeeds, `cctail --version` prints version, `cargo test` all tests pass. README keybinding table verified against `src/tui/app.rs` key handlers. |
+
+---
+
+## 31. Add rstest & Remove Redundant Tests
+
+Add `rstest` dev-dependency for future parameterized tests. Remove 12 trivial/redundant tests that duplicate coverage or test stdlib/compiler-guaranteed behavior.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Identified 12 tests to remove across symbols.rs (2), theme.rs (8), tui/mod.rs (3). One structural replacement test for theme.rs. |
+| Implement | `[x]` | **`Cargo.toml`**: Added `rstest = "0.23"` to `[dev-dependencies]`. **`src/symbols.rs`**: Removed `test_unicode_symbols` and `test_ascii_symbols` (duplicated by `test_symbols_new_false_is_unicode` and `test_symbols_new_true_is_ascii`). **`src/theme.rs`**: Removed 6 backward-compatible snapshot tests, `test_agent_palette_length`, `test_theme_colors_clone`. Added `test_dark_theme_is_self_consistent` (palette length, no Reset colors, dark != light, clone equality). **`src/tui/mod.rs`**: Removed `test_shutdown_flag_can_be_set_externally`, `test_shutdown_flag_forces_quit`, `test_shutdown_flag_shared_across_threads` (test Arc/AtomicBool stdlib behavior). Net: -12 tests (720 -> 708). |
+| Review | `[x]` | All 708 tests pass, `cargo test` clean. No TODO/FIXME comments, no debug macros, no leftover artifacts in changed files. |
+
+---
+
+## 32. Consolidate Test Groups with rstest Parameterization
+
+Consolidate repetitive test groups into parameterized `rstest` tests across 2 files, reducing boilerplate while preserving all test cases.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Identified 36 individual test functions across tool_summary.rs (15) and content_render.rs (21) that can be consolidated into 6 rstest parameterized functions. |
+| Implement | `[x]` | **`src/tool_summary.rs`**: Added `use rstest::rstest;`. Replaced 3 wrong-type tests with 1 `test_wrong_type_fields_fallback` rstest (3 cases). Replaced 6 truncate_chars tests with 1 `test_truncate_chars` rstest (6 cases). Replaced 6 env-var redaction tests with 1 `test_redact_env_var_secrets` rstest (6 cases). Net: 15 functions -> 3 functions. **`src/content_render.rs`**: Added `use rstest::rstest;`. Replaced 9 format_size tests with 1 `test_format_size` rstest (9 cases). Replaced 12 has_renderable_content tests with 2 rstest functions: `test_has_renderable_content_true` (6 cases) and `test_has_renderable_content_false` (6 cases). Net: 21 functions -> 3 functions. Grand total: -30 net function definitions. All 708 tests pass (rstest generates individual cases at runtime). |
+| Review | `[x]` | Code quality review: APPROVED (all 36 original test cases preserved exactly in 6 rstest functions). Security review: APPROVED (clean structural refactoring, no security impact). All 708 tests pass, `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 33. Integration Tests for End-to-End Pipeline
+
+Add `tests/integration.rs` with 3 end-to-end tests exercising cross-module handoffs that unit tests cannot cover.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Identified 3 test scenarios: session discovery to replay, incremental reading, filter interaction with ring buffer. |
+| Implement | `[x]` | **New file: `src/lib.rs`** (18 lines): Library crate root re-exporting all modules with `pub` visibility. **`src/main.rs`**: Replaced `mod` declarations with `use cctail::*` imports. **`src/watcher.rs`**: Changed `pub(crate)` to `pub` for `FileWatchState`, `new()`, `new_with_offset()`, `byte_offset`, `read_new_entries()`. **New file: `tests/integration.rs`** (~175 lines): 3 test functions. Test 1 (`test_session_discovery_to_replay`): creates temp dir with JSONL files + subagent dir, calls `discover_sessions()` then `replay_session()`, verifies entries parsed correctly, sorted by timestamp, Progress entries excluded, EOF offsets match file sizes. Test 2 (`test_incremental_reading`): writes JSONL file with 2 lines, reads with `read_new_entries()`, appends 2 more lines, reads again verifying only new entries returned, reads again with no changes verifying 0 entries. Test 3 (`test_filter_interaction_end_to_end`): parses 6 entries (2 main, 2 sub-A, 2 sub-B), pushes into `RingBuffer`, verifies `FilterState::default()` returns all 6, agent filter "sub-A" returns 2, agent filter "sub-B" returns 2. All 711 tests pass (708 unit + 3 integration). |
+| Review | `[x]` | Code quality review: APPROVED. Security review: APPROVED. Finalization: no TODO/FIXME comments, no debug macros (dbg!/println!), all 711 tests pass (708 unit + 3 integration), `cargo clippy -- -D warnings` clean. |
+
+---
+
+## 34. High-Value Edge Case Unit Tests
+
+Add missing edge case tests to existing modules where coverage gaps are most impactful.
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Plan | `[x]` | Identified 5 edge case tests across watcher.rs (2), stream.rs (1), session_stats.rs (1), ring_buffer.rs (1). |
+| Implement | `[x]` | **`src/watcher.rs`**: Test #24 `test_three_phase_incomplete_line` — writes partial JSON across 3 appends, verifies entry only appears after final newline, checks `incomplete_line_buf` state at each phase. Test #25 `test_alternating_complete_and_incomplete_lines` — 4-cycle test alternating complete/incomplete writes, verifies correct entry counts and buffer state at each cycle. **`src/stream.rs`**: `test_replay_phase_interleaved_valid_invalid_lines` — creates temp file with valid JSON entries interspersed with invalid JSON, blank lines, and garbage; verifies `replay_phase()` returns Ok with correct EOF offset and does not panic. **`src/session_stats.rs`**: `test_content_variations_null_string_non_object_array` — pushes entries with content: null, string, non-object array elements (integers, booleans), and valid tool_use arrays; verifies only valid tool_use blocks are counted (2 total). **`src/ring_buffer.rs`**: `test_stress_10k_entries_tight_budget_byte_accounting` — pushes 10,000 entries with budget for ~50; verifies `byte_size()` equals sum of remaining entries' `estimated_byte_size()`, `byte_size() <= budget`, and reasonable entry count. All 716 tests pass (713 unit + 3 integration), `cargo clippy -- -D warnings` clean. |
+| Review | `[x]` | 5 new test functions. All 716 tests pass, zero clippy warnings. |
+
+---
+
 ## Summary
 
 | # | Feature | Plan | Implement | Review |
@@ -361,3 +445,10 @@ Fix scroll system to use visual (wrapped) line counts instead of logical line co
 | 25 | ASCII Fallback (Feature 5) | `[x]` | `[x]` | `[x]` |
 | 26 | Search Highlight Bug Fixes | `[x]` | `[x]` | `[x]` |
 | 27 | Visual-line scroll fix (wrap-aware) | `[x]` | `[x]` | `[x]` |
+| 28 | Timestamp Timezone Conversion | `[x]` | `[x]` | `[x]` |
+| 29 | Dirty-Flag Redraw Optimization | `[x]` | `[x]` | `[x]` |
+| 30 | Polish CLI and README | `[x]` | `[x]` | `[x]` |
+| 31 | Add rstest & remove redundant tests | `[x]` | `[x]` | `[x]` |
+| 32 | Consolidate tests with rstest parameterization | `[x]` | `[x]` | `[x]` |
+| 33 | Integration tests for end-to-end pipeline | `[x]` | `[x]` | `[x]` |
+| 34 | High-value edge case unit tests | `[x]` | `[x]` | `[x]` |
