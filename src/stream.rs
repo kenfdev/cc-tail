@@ -422,28 +422,25 @@ fn role_indicator<'a>(
     }
 }
 
-/// Format an ISO 8601 timestamp to `HH:MM:SS`.
+/// Format an ISO 8601 timestamp to `HH:MM:SS` in the host's local timezone.
 ///
-/// Extracts the time portion from timestamps like `2025-01-15T14:30:12Z`
-/// or `2025-01-15T14:30:12.123Z`. Returns `"--:--:--"` if the timestamp
-/// is missing or does not contain a recognizable time component.
+/// Parses timestamps like `2025-01-15T14:30:12Z` or `2025-01-15T14:30:12+09:00`
+/// using `chrono`, converts from UTC (or the given offset) to the local timezone,
+/// and formats as `HH:MM:SS`. Returns `"--:--:--"` if the timestamp is missing
+/// or malformed.
 fn format_timestamp(ts: Option<&str>) -> String {
+    let fallback = "--:--:--".to_string();
     match ts {
         Some(s) => {
-            // Look for the 'T' separator in ISO 8601
-            if let Some(t_pos) = s.find('T') {
-                let time_part = &s[t_pos + 1..];
-                // Extract HH:MM:SS (first 8 characters)
-                if time_part.len() >= 8
-                    && time_part.as_bytes()[2] == b':'
-                    && time_part.as_bytes()[5] == b':'
-                {
-                    return time_part[..8].to_string();
-                }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return dt
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string();
             }
-            "--:--:--".to_string()
+            fallback
         }
-        None => "--:--:--".to_string(),
+        None => fallback,
     }
 }
 
@@ -458,25 +455,31 @@ mod tests {
 
     // -- format_timestamp tests -----------------------------------------------
 
+    /// Helper: compute the expected local HH:MM:SS for a given RFC 3339 string.
+    fn expected_local_time(rfc3339: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
+    }
+
     #[test]
     fn test_format_timestamp_iso8601() {
-        assert_eq!(format_timestamp(Some("2025-01-15T14:30:12Z")), "14:30:12");
+        let input = "2025-01-15T14:30:12Z";
+        assert_eq!(format_timestamp(Some(input)), expected_local_time(input));
     }
 
     #[test]
     fn test_format_timestamp_with_millis() {
-        assert_eq!(
-            format_timestamp(Some("2025-01-15T14:30:12.123Z")),
-            "14:30:12"
-        );
+        let input = "2025-01-15T14:30:12.123Z";
+        assert_eq!(format_timestamp(Some(input)), expected_local_time(input));
     }
 
     #[test]
     fn test_format_timestamp_with_offset() {
-        assert_eq!(
-            format_timestamp(Some("2025-01-15T14:30:12+09:00")),
-            "14:30:12"
-        );
+        let input = "2025-01-15T14:30:12+09:00";
+        assert_eq!(format_timestamp(Some(input)), expected_local_time(input));
     }
 
     #[test]
@@ -491,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_format_timestamp_short_time() {
-        // 'T' present but time part too short
+        // 'T' present but time part too short — not valid RFC 3339
         assert_eq!(format_timestamp(Some("2025-01-15T14")), "--:--:--");
     }
 
@@ -583,16 +586,18 @@ mod tests {
     #[test]
     fn test_print_entry_user_pipe() {
         let config = make_config_pipe();
-        let entry = parse_jsonl_line(
-            r#"{"type": "user", "timestamp": "2025-01-15T10:30:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}}"#,
-        )
-        .unwrap();
+        let ts = "2025-01-15T10:30:00Z";
+        let json = format!(
+            r#"{{"type": "user", "timestamp": "{}", "message": {{"role": "user", "content": [{{"type": "text", "text": "fix the bug"}}]}}}}"#,
+            ts
+        );
+        let entry = parse_jsonl_line(&json).unwrap();
 
         let mut buf = Vec::new();
         print_entry(&mut buf, &entry, &config).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("10:30:00"));
+        assert!(output.contains(&expected_local_time(ts)));
         assert!(output.contains("[H]"));
         assert!(output.contains("fix the bug"));
     }
@@ -600,16 +605,18 @@ mod tests {
     #[test]
     fn test_print_entry_assistant_pipe() {
         let config = make_config_pipe();
-        let entry = parse_jsonl_line(
-            r#"{"type": "assistant", "timestamp": "2025-01-15T10:30:15Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll investigate."}]}}"#,
-        )
-        .unwrap();
+        let ts = "2025-01-15T10:30:15Z";
+        let json = format!(
+            r#"{{"type": "assistant", "timestamp": "{}", "message": {{"role": "assistant", "content": [{{"type": "text", "text": "I'll investigate."}}]}}}}"#,
+            ts
+        );
+        let entry = parse_jsonl_line(&json).unwrap();
 
         let mut buf = Vec::new();
         print_entry(&mut buf, &entry, &config).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("10:30:15"));
+        assert!(output.contains(&expected_local_time(ts)));
         assert!(output.contains("[A]"));
         assert!(output.contains("I'll investigate."));
     }
@@ -650,15 +657,16 @@ mod tests {
     #[test]
     fn test_print_entry_no_message() {
         let config = make_config_pipe();
-        let entry =
-            parse_jsonl_line(r#"{"type": "system", "timestamp": "2025-01-15T10:00:00Z"}"#).unwrap();
+        let ts = "2025-01-15T10:00:00Z";
+        let json = format!(r#"{{"type": "system", "timestamp": "{}"}}"#, ts);
+        let entry = parse_jsonl_line(&json).unwrap();
 
         let mut buf = Vec::new();
         print_entry(&mut buf, &entry, &config).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         // Should still print the header line
-        assert!(output.contains("10:00:00"));
+        assert!(output.contains(&expected_local_time(ts)));
         assert!(output.contains("[S]"));
     }
 

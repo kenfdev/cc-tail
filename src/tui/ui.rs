@@ -591,26 +591,21 @@ fn draw_logstream(frame: &mut Frame, app: &mut App, area: Rect) {
 // Log stream helpers
 // ---------------------------------------------------------------------------
 
-/// Parse an ISO 8601 timestamp string to "HH:MM:SS" format.
+/// Parse an ISO 8601 timestamp string to "HH:MM:SS" in the host's local timezone.
 ///
 /// Falls back to "--:--:--" if the timestamp is absent or malformed.
-/// Supports formats like "2025-01-15T10:30:00Z" and "2025-01-15T10:30:00.123Z".
+/// Supports formats like "2025-01-15T10:30:00Z" and "2025-01-15T10:30:00+09:00".
 fn format_timestamp(ts: &Option<String>) -> String {
     let fallback = "--:--:--".to_string();
-    let ts = match ts {
+    let s = match ts {
         Some(s) => s,
         None => return fallback,
     };
 
-    // Find the 'T' separator in ISO 8601.
-    let time_part = match ts.find('T') {
-        Some(idx) => &ts[idx + 1..],
-        None => return fallback,
-    };
-
-    // Extract HH:MM:SS (first 8 characters of the time part).
-    if time_part.len() >= 8 && time_part.as_bytes()[2] == b':' && time_part.as_bytes()[5] == b':' {
-        time_part[..8].to_string()
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        dt.with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
     } else {
         fallback
     }
@@ -1851,22 +1846,34 @@ mod tests {
 
     // -- format_timestamp tests -----------------------------------------------
 
+    /// Helper: compute the expected local HH:MM:SS for a given RFC 3339 string.
+    fn expected_local_time(rfc3339: &str) -> String {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
+    }
+
     #[test]
     fn test_format_timestamp_valid_iso8601() {
-        let ts = Some("2025-01-15T10:30:00Z".to_string());
-        assert_eq!(format_timestamp(&ts), "10:30:00");
+        let input = "2025-01-15T10:30:00Z";
+        let ts = Some(input.to_string());
+        assert_eq!(format_timestamp(&ts), expected_local_time(input));
     }
 
     #[test]
     fn test_format_timestamp_with_milliseconds() {
-        let ts = Some("2025-01-15T10:30:00.123Z".to_string());
-        assert_eq!(format_timestamp(&ts), "10:30:00");
+        let input = "2025-01-15T10:30:00.123Z";
+        let ts = Some(input.to_string());
+        assert_eq!(format_timestamp(&ts), expected_local_time(input));
     }
 
     #[test]
     fn test_format_timestamp_with_offset() {
-        let ts = Some("2025-01-15T10:30:00+09:00".to_string());
-        assert_eq!(format_timestamp(&ts), "10:30:00");
+        let input = "2025-01-15T10:30:00+09:00";
+        let ts = Some(input.to_string());
+        assert_eq!(format_timestamp(&ts), expected_local_time(input));
     }
 
     #[test]
