@@ -48,13 +48,13 @@ use crate::log_entry::{parse_jsonl_line, LogEntry};
 /// trailing bytes from the last read that did not end with a newline
 /// (i.e. an incomplete JSONL line that will be completed on the next
 /// write to the file).
-pub(crate) struct FileWatchState {
-    pub(crate) byte_offset: u64,
+pub struct FileWatchState {
+    pub byte_offset: u64,
     incomplete_line_buf: String,
 }
 
 impl FileWatchState {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             byte_offset: 0,
             incomplete_line_buf: String::new(),
@@ -65,11 +65,17 @@ impl FileWatchState {
     ///
     /// This is useful when replay has already read the file up to a known
     /// position and the watcher should start tailing from that point.
-    pub(crate) fn new_with_offset(offset: u64) -> Self {
+    pub fn new_with_offset(offset: u64) -> Self {
         Self {
             byte_offset: offset,
             incomplete_line_buf: String::new(),
         }
+    }
+}
+
+impl Default for FileWatchState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -179,7 +185,7 @@ pub fn is_watched_jsonl(path: &Path) -> bool {
 ///
 /// Any trailing bytes that do not end with a newline are buffered in
 /// `state.incomplete_line_buf` for the next call.
-pub(crate) fn read_new_entries(
+pub fn read_new_entries(
     path: &Path,
     state: &mut FileWatchState,
     verbose: bool,
@@ -480,7 +486,7 @@ fn process_notify_event(
                 // sees the Modify event).
                 let state = file_states
                     .entry(validated_path.clone())
-                    .or_insert_with(FileWatchState::new);
+                    .or_default();
                 let entries = read_new_entries(&validated_path, state, verbose);
                 for entry in entries {
                     let _ = tx.blocking_send(WatcherEvent::NewEntry {
@@ -498,7 +504,7 @@ fn process_notify_event(
 
                 let state = file_states
                     .entry(validated_path.clone())
-                    .or_insert_with(FileWatchState::new);
+                    .or_default();
                 let entries = read_new_entries(&validated_path, state, verbose);
                 for entry in entries {
                     let _ = tx.blocking_send(WatcherEvent::NewEntry {
@@ -1129,6 +1135,178 @@ mod tests {
     }
 
     // -- 23. Remove event with already-deleted file --------------------------
+
+    // -- 24. Three-phase incomplete line ------------------------------------
+
+    #[test]
+    fn test_three_phase_incomplete_line() {
+        // Write partial JSON (no newline) across 3 appends; entry should only
+        // appear after the final newline.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("three_phase.jsonl");
+
+        // Phase 1: write the first fragment of a JSON line (no newline).
+        let fragment1 = r#"{"type": "us"#;
+        std::fs::write(&path, fragment1).unwrap();
+
+        let mut state = FileWatchState::new();
+        let entries1 = read_new_entries(&path, &mut state, false);
+        assert_eq!(entries1.len(), 0, "phase 1: no complete line yet");
+        assert!(
+            !state.incomplete_line_buf.is_empty(),
+            "phase 1: incomplete_line_buf should hold the partial data"
+        );
+
+        // Phase 2: append the middle fragment (still no newline).
+        let fragment2 = r#"er", "sessionId": "s"#;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(file, "{}", fragment2).unwrap();
+        drop(file);
+
+        let entries2 = read_new_entries(&path, &mut state, false);
+        assert_eq!(entries2.len(), 0, "phase 2: still no complete line");
+        assert!(
+            !state.incomplete_line_buf.is_empty(),
+            "phase 2: incomplete_line_buf should hold accumulated partial data"
+        );
+
+        // Phase 3: append the final fragment + newline to complete the line.
+        let fragment3 = "1\"}\n";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(file, "{}", fragment3).unwrap();
+        drop(file);
+
+        let entries3 = read_new_entries(&path, &mut state, false);
+        assert_eq!(entries3.len(), 1, "phase 3: one complete entry");
+        assert_eq!(entries3[0].entry_type, crate::log_entry::EntryType::User);
+        assert_eq!(entries3[0].session_id.as_deref(), Some("s1"));
+        assert!(
+            state.incomplete_line_buf.is_empty(),
+            "phase 3: incomplete_line_buf should be empty after complete line"
+        );
+    }
+
+    // -- 25. Alternating complete and incomplete lines -----------------------
+
+    #[test]
+    fn test_alternating_complete_and_incomplete_lines() {
+        // Cycle through 4 rounds of alternating complete and incomplete writes.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("alternating.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut state = FileWatchState::new();
+
+        // Cycle 1: Write one complete line + start of a partial line.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(
+                file,
+                "{}\n{}",
+                r#"{"type": "user", "sessionId": "c1"}"#,
+                r#"{"type": "assis"#
+            )
+            .unwrap();
+            drop(file);
+
+            let entries = read_new_entries(&path, &mut state, false);
+            assert_eq!(entries.len(), 1, "cycle 1: one complete entry");
+            assert_eq!(entries[0].session_id.as_deref(), Some("c1"));
+            assert!(
+                !state.incomplete_line_buf.is_empty(),
+                "cycle 1: partial line buffered"
+            );
+        }
+
+        // Cycle 2: Complete the partial line (no new partial).
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(file, "{}\n", r#"tant", "sessionId": "c2"}"#).unwrap();
+            drop(file);
+
+            let entries = read_new_entries(&path, &mut state, false);
+            assert_eq!(entries.len(), 1, "cycle 2: completed partial becomes entry");
+            assert_eq!(
+                entries[0].entry_type,
+                crate::log_entry::EntryType::Assistant
+            );
+            assert_eq!(entries[0].session_id.as_deref(), Some("c2"));
+            assert!(
+                state.incomplete_line_buf.is_empty(),
+                "cycle 2: no remaining partial"
+            );
+        }
+
+        // Cycle 3: Write a complete line + start another partial.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(
+                file,
+                "{}\n{}",
+                r#"{"type": "system", "sessionId": "c3"}"#,
+                r#"{"type": "prog"#
+            )
+            .unwrap();
+            drop(file);
+
+            let entries = read_new_entries(&path, &mut state, false);
+            assert_eq!(entries.len(), 1, "cycle 3: one complete entry");
+            assert_eq!(entries[0].entry_type, crate::log_entry::EntryType::System);
+            assert_eq!(entries[0].session_id.as_deref(), Some("c3"));
+            assert!(
+                !state.incomplete_line_buf.is_empty(),
+                "cycle 3: partial line buffered"
+            );
+        }
+
+        // Cycle 4: Complete the partial line + write another full line.
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            write!(
+                file,
+                "{}\n{}\n",
+                r#"ress", "sessionId": "c4"}"#,
+                r#"{"type": "user", "sessionId": "c5"}"#
+            )
+            .unwrap();
+            drop(file);
+
+            let entries = read_new_entries(&path, &mut state, false);
+            assert_eq!(
+                entries.len(),
+                2,
+                "cycle 4: completed partial + one new complete"
+            );
+            assert_eq!(
+                entries[0].entry_type,
+                crate::log_entry::EntryType::Progress
+            );
+            assert_eq!(entries[0].session_id.as_deref(), Some("c4"));
+            assert_eq!(entries[1].entry_type, crate::log_entry::EntryType::User);
+            assert_eq!(entries[1].session_id.as_deref(), Some("c5"));
+            assert!(
+                state.incomplete_line_buf.is_empty(),
+                "cycle 4: no remaining partial"
+            );
+        }
+    }
 
     #[test]
     fn test_remove_event_with_deleted_file() {
