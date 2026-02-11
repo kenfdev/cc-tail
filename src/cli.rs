@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// Monitor Claude Code sessions in real-time
 #[derive(Parser, Debug)]
-#[command(name = "cctail", about = "Monitor Claude Code sessions in real-time")]
+#[command(name = "cctail", about = "Monitor Claude Code sessions in real-time", version)]
 pub struct Cli {
     /// Path to the project directory (actual code path, not log path).
     /// cc-tail converts internally to the ~/.claude/projects/ equivalent.
